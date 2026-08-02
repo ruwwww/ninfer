@@ -26,31 +26,32 @@ GqaAttentionRoute gqa_attention_resolve_route(std::int32_t q_heads, std::int32_t
 const char* gqa_attention_route_name(GqaAttentionRoute route);
 
 void gqa_attention_small_t_launch(const Tensor& q, const Tensor& k, const Tensor& v,
-                                  const Tensor& positions, float scale, KVCacheLayerView cache,
-                                  GqaExecutionEnvelope envelope, Tensor& partial_acc,
-                                  Tensor& partial_m, Tensor& partial_l, Tensor& out,
-                                  cudaStream_t stream);
+                                  const Tensor& positions, float scale, std::int32_t window,
+                                  KVCacheLayerView cache, GqaExecutionEnvelope envelope,
+                                  Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
+                                  Tensor& out, cudaStream_t stream);
 
 void gqa_attention_cached_small_t_launch(const Tensor& q, const Tensor& positions, float scale,
-                                         const KVCacheLayerView& cache,
+                                         std::int32_t window, const KVCacheLayerView& cache,
                                          GqaExecutionEnvelope envelope, Tensor& partial_acc,
                                          Tensor& partial_m, Tensor& partial_l, Tensor& out,
                                          cudaStream_t stream);
 
 void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
-                                 const Tensor& positions, float scale, KVCacheLayerView cache,
-                                 Tensor& out, cudaStream_t stream);
+                                 const Tensor& positions, float scale, std::int32_t window,
+                                 KVCacheLayerView cache, Tensor& out, cudaStream_t stream);
 
 void gqa_kv_append_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                           KVCacheLayerView cache, cudaStream_t stream);
 
 void gqa_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
-                                           const KVCacheLayerView& cache, Tensor& out,
-                                           cudaStream_t stream);
+                                           std::int32_t window, const KVCacheLayerView& cache,
+                                           Tensor& out, cudaStream_t stream);
 
 void gqa_attention_launch(const Tensor& q, const Tensor& k, const Tensor& v,
-                          const Tensor& positions, float scale, KVCacheLayerView cache,
-                          GqaExecutionEnvelope envelope, Tensor* partial_acc, Tensor* partial_m,
-                          Tensor* partial_l, Tensor& out, cudaStream_t stream);
+                          const Tensor& positions, float scale, std::int32_t window,
+                          KVCacheLayerView cache, GqaExecutionEnvelope envelope,
+                          Tensor* partial_acc, Tensor* partial_m, Tensor* partial_l, Tensor& out,
+                          cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

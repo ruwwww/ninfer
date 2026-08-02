@@ -267,6 +267,7 @@ private:
     const ops::SamplingConfig* sampling_config_ = nullptr;
     MtpW mtp_;
     std::array<FullLayerW, TextConfig::full_attention_layers()> full_{};
+    std::array<FullLayerW, TextConfig::layers - TextConfig::full_attention_layers()> swa_{};
     std::array<GdnLayerW, TextConfig::gdn_layers()> gdn_{};
     std::array<Weight, TextConfig::gdn_layers()> gdn_in_a_{};
     std::array<Weight, TextConfig::gdn_layers()> gdn_in_b_{};

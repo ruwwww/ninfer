@@ -215,7 +215,8 @@ load_added_tokens(const Json& root, std::string_view label, std::vector<std::str
         AddedToken token = parse_added_token(item, label);
         validate_supported_added_token(token, label);
         const auto index = static_cast<std::size_t>(token.id);
-        if (occupied_vocab_ids.contains(token.id)) {
+        if (occupied_vocab_ids.contains(token.id) &&
+            id_to_token.at(index) != token.content) {
             throw std::invalid_argument("field added_tokens overlaps existing id in " +
                                         std::string(label));
         }
@@ -223,7 +224,8 @@ load_added_tokens(const Json& root, std::string_view label, std::vector<std::str
             throw std::invalid_argument("field added_tokens has duplicate id in " +
                                         std::string(label));
         }
-        if (occupied_vocab_tokens.contains(token.content) ||
+        const auto vocab_entry = occupied_vocab_tokens.find(token.content);
+        if ((vocab_entry != occupied_vocab_tokens.end() && vocab_entry->second != token.id) ||
             !seen_added_contents.emplace(token.content, token.id).second) {
             throw std::invalid_argument("field added_tokens has duplicate content mapping in " +
                                         std::string(label));
@@ -270,8 +272,16 @@ void merge_added_tokens_decoder(const Json& root, std::string_view label,
             continue;
         }
         if (occupied_vocab_ids.contains(id)) {
-            throw std::invalid_argument("added_tokens_decoder overlaps vocabulary id " +
-                                        std::to_string(id));
+            if (id_to_token.at(id) != token.content) {
+                throw std::invalid_argument("added_tokens_decoder overlaps vocabulary id " +
+                                            std::to_string(id));
+            }
+            if (token_by_content.contains(token.content) &&
+                token_by_content.at(token.content) != id) {
+                throw std::invalid_argument("conflicting added-token content mapping for " +
+                                            token.content);
+            }
+            continue;
         }
         if (token_by_content.contains(token.content) ||
             occupied_vocab_tokens.contains(token.content)) {

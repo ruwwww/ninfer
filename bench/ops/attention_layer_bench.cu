@@ -508,12 +508,12 @@ Result run_case(Resources<Geometry>& resources, KVCache& cache, ninfer::DeviceBu
         const auto visible = static_cast<std::uint32_t>(context + tokens);
         if (options.attention == AttentionSelection::PromptControl) {
             ops::detail::gqa_attention_prompt_launch(query_transformed, key_transformed, value,
-                                                     positions, kAttentionScale,
+                                                     positions, kAttentionScale, 0,
                                                      cache.layer_view(0), attention, layer_stream);
         } else {
             ops::gqa_attention(query_transformed, key_transformed, value, positions,
-                               kAttentionScale, cache.layer_view(0), {visible, visible},
-                               resources.workspace, attention, layer_stream);
+                               kAttentionScale, 0, cache.layer_view(0), {visible, visible},
+                               resources.workspace, attention, kHeadDim, layer_stream);
         }
         if (options.sigmoid == SigmoidSelection::Dv12CandidateB128) {
             ops::detail::sigmoid_gate_mul_bf16x8_launch(gate, attention, 128, layer_stream);
@@ -534,7 +534,8 @@ Result run_case(Resources<Geometry>& resources, KVCache& cache, ninfer::DeviceBu
         bench::measure_cold_graph(graph, flush, stream, options.warmup, options.repeat);
     const std::uint32_t visible = static_cast<std::uint32_t>(context + tokens);
     const auto selected_route =
-        ops::detail::gqa_attention_resolve_route(Geometry::query_heads, tokens, {visible, visible});
+        ops::detail::gqa_attention_resolve_route(Geometry::query_heads, kHeadDim, tokens,
+                                                 {visible, visible});
     const char* route = options.attention == AttentionSelection::PromptControl
                             ? "prompt_control"
                             : ops::detail::gqa_attention_route_name(selected_route);
@@ -585,8 +586,8 @@ void run_geometry(const Options& options, cudaStream_t stream, ninfer::DeviceBuf
 
     const std::size_t workspace_bytes =
         std::max(ops::gqa_attention_workspace_capacity_bytes(
-                     Geometry::query_heads, kv_dtype, {1, static_cast<std::uint32_t>(max_context)},
-                     1, max_tokens),
+                     Geometry::query_heads, kHeadDim, kv_dtype,
+                     {1, static_cast<std::uint32_t>(max_context)}, 1, max_tokens),
                  ops::linear_add_workspace_capacity_bytes(
                      Geometry::hidden == 5120 ? QType::Q5G64_F16S : QType::W8G32_F16S,
                      Geometry::hidden, Geometry::query_rows, 1, max_tokens));

@@ -20,39 +20,41 @@ inline constexpr int kGqaPrefillI8Warps      = 16;
 inline constexpr int kGqaPrefillI8Threads    = kGqaPrefillI8Warps * 32;
 inline constexpr int kGqaPrefillI8Br         = 64;
 inline constexpr int kGqaPrefillI8Bc         = 64;
-inline constexpr int kGqaPrefillI8Groups     = kGqaPrefillHeadDim / kGqaKvQuantGroup;
-inline constexpr int kGqaPrefillI8DB16       = kGqaPrefillHeadDim / 2;
 inline constexpr int kGqaPrefillI8RowTiles   = kGqaPrefillI8Br / 16;
 inline constexpr int kGqaPrefillI8DConsumers = kGqaPrefillI8Warps / kGqaPrefillI8RowTiles;
 
-inline constexpr int kGqaPrefillI8QBytes = kGqaPrefillI8Br * kGqaPrefillHeadDim;
-inline constexpr int kGqaPrefillI8QScaleBytes =
-    kGqaPrefillI8Br * kGqaPrefillI8Groups * static_cast<int>(sizeof(float));
-inline constexpr int kGqaPrefillI8KBytes = kGqaPrefillI8Bc * kGqaPrefillHeadDim;
-inline constexpr int kGqaPrefillI8VBytes = kGqaPrefillI8Bc * kGqaPrefillHeadDim;
-inline constexpr int kGqaPrefillI8VStageBytes =
-    kGqaPrefillI8Bc * kGqaPrefillHeadDim * static_cast<int>(sizeof(__half));
-inline constexpr int kGqaPrefillI8PBytes =
-    kGqaPrefillI8Br * kGqaPrefillI8Bc * static_cast<int>(sizeof(__half));
-inline constexpr int kGqaPrefillI8ScaleBytes =
-    2 * kGqaPrefillI8Bc * kGqaPrefillI8Groups * static_cast<int>(sizeof(__half));
-inline constexpr int kGqaPrefillI8StatsBytes =
-    2 * kGqaPrefillI8Br * static_cast<int>(sizeof(float));
-inline constexpr int kGqaPrefillI8SmemBytes = kGqaPrefillI8QBytes + kGqaPrefillI8QScaleBytes +
-                                              kGqaPrefillI8KBytes + kGqaPrefillI8VBytes +
-                                              kGqaPrefillI8VStageBytes + kGqaPrefillI8PBytes +
-                                              kGqaPrefillI8ScaleBytes + kGqaPrefillI8StatsBytes;
-
-static_assert(kGqaPrefillI8Groups == 4);
 static_assert(kGqaPrefillI8DConsumers == 4);
-static_assert(kGqaPrefillI8SmemBytes == 92672);
 
+template <typename Geometry>
+struct GqaPrefillI8Smem {
+    static constexpr int Groups      = Geometry::HeadDim / kGqaKvQuantGroup;
+    static constexpr int DB16        = Geometry::HeadDim / 2;
+    static constexpr int QBytes      = kGqaPrefillI8Br * Geometry::HeadDim;
+    static constexpr int QScaleBytes = kGqaPrefillI8Br * Groups * static_cast<int>(sizeof(float));
+    static constexpr int KBytes      = kGqaPrefillI8Bc * Geometry::HeadDim;
+    static constexpr int VBytes      = kGqaPrefillI8Bc * Geometry::HeadDim;
+    static constexpr int VStageBytes =
+        kGqaPrefillI8Bc * Geometry::HeadDim * static_cast<int>(sizeof(__half));
+    static constexpr int PBytes =
+        kGqaPrefillI8Br * kGqaPrefillI8Bc * static_cast<int>(sizeof(__half));
+    static constexpr int ScaleBytes =
+        2 * kGqaPrefillI8Bc * Groups * static_cast<int>(sizeof(__half));
+    static constexpr int StatsBytes = 2 * kGqaPrefillI8Br * static_cast<int>(sizeof(float));
+    static constexpr int SmemBytes  = QBytes + QScaleBytes + KBytes + VBytes + VStageBytes +
+                                     PBytes + ScaleBytes + StatsBytes;
+
+    static_assert(Groups == 2 || Groups == 4);
+    static_assert(SmemBytes == 50688 || SmemBytes == 92672);
+};
+
+template <typename Geometry>
 __device__ __forceinline__ void gqa_prefill_i8_store_swz(std::int8_t* tile, int row, int d,
                                                          std::int8_t code) {
     const int col_b16 = d >> 1;
     const int byte    = d & 1;
-    const int off     = (row * kGqaPrefillI8DB16 + gqa_prefill_swz(row, col_b16)) * 2 + byte;
-    tile[off]         = code;
+    const int off     = (row * GqaPrefillI8Smem<Geometry>::DB16 + gqa_prefill_swz(row, col_b16)) * 2 +
+                   byte;
+    tile[off] = code;
 }
 
 __device__ __forceinline__ int gqa_prefill_i8_p_swz(int row, int col) {
@@ -87,14 +89,15 @@ __launch_bounds__(256) __global__ void gqa_attention_prefill_fill_i8_kernel(
     std::int32_t tokens, std::int32_t padded_context) {
     constexpr int Warps         = 8;
     constexpr unsigned FullMask = 0xffffffffu;
+    constexpr int Groups        = Geometry::HeadDim / kGqaKvQuantGroup;
     const int warp              = static_cast<int>(threadIdx.x) >> 5;
     const int lane              = static_cast<int>(threadIdx.x) & 31;
     const int unit              = static_cast<int>(blockIdx.x) * Warps + warp;
-    const int units             = tokens * Geometry::KVHeads * kGqaPrefillI8Groups;
+    const int units             = tokens * Geometry::KVHeads * Groups;
     if (unit >= units) { return; }
 
-    const int group    = unit % kGqaPrefillI8Groups;
-    const int tmp      = unit / kGqaPrefillI8Groups;
+    const int group    = unit % Groups;
+    const int tmp      = unit / Groups;
     const int kv_head  = tmp % Geometry::KVHeads;
     const int token    = tmp / Geometry::KVHeads;
     const int position = positions[0] + token;
@@ -120,17 +123,17 @@ __launch_bounds__(256) __global__ void gqa_attention_prefill_fill_i8_kernel(
     const float kinv = ks > 0.0f ? 1.0f / ks : 0.0f;
     const float vinv = vs > 0.0f ? 1.0f / vs : 0.0f;
 
-    cache_k[gqa_kv_quant_code_index(kv_head, d0, position, padded_context)] =
+    cache_k[gqa_kv_quant_code_index<Geometry>(kv_head, d0, position, padded_context)] =
         gqa_kv_quant_code(k0, kinv);
-    cache_k[gqa_kv_quant_code_index(kv_head, d1, position, padded_context)] =
+    cache_k[gqa_kv_quant_code_index<Geometry>(kv_head, d1, position, padded_context)] =
         gqa_kv_quant_code(k1, kinv);
-    cache_v[gqa_kv_quant_code_index(kv_head, d0, position, padded_context)] =
+    cache_v[gqa_kv_quant_code_index<Geometry>(kv_head, d0, position, padded_context)] =
         gqa_kv_quant_code(v0, vinv);
-    cache_v[gqa_kv_quant_code_index(kv_head, d1, position, padded_context)] =
+    cache_v[gqa_kv_quant_code_index<Geometry>(kv_head, d1, position, padded_context)] =
         gqa_kv_quant_code(v1, vinv);
     if (lane == 0) {
         const std::int64_t scale_off =
-            gqa_kv_quant_scale_index(kv_head, group, position, padded_context);
+            gqa_kv_quant_scale_index<Geometry>(kv_head, group, position, padded_context);
         scale_k[scale_off] = ksh;
         scale_v[scale_off] = vsh;
     }
@@ -142,12 +145,12 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
     const __half* __restrict__ cache_v_scale, const std::int32_t* __restrict__ positions,
     float scale, __nv_bfloat16* __restrict__ out, std::int32_t tokens,
-    std::int32_t padded_context) {
-    constexpr int D             = kGqaPrefillHeadDim;
+    std::int32_t padded_context, std::int32_t window) {
+    constexpr int D             = Geometry::HeadDim;
     constexpr int Br            = kGqaPrefillI8Br;
     constexpr int Bc            = kGqaPrefillI8Bc;
-    constexpr int DB16          = kGqaPrefillI8DB16;
-    constexpr int Groups        = kGqaPrefillI8Groups;
+    constexpr int DB16          = GqaPrefillI8Smem<Geometry>::DB16;
+    constexpr int Groups        = GqaPrefillI8Smem<Geometry>::Groups;
     constexpr int GroupKc       = kGqaKvQuantGroup / 32;
     constexpr int QKNt          = Bc / 8;
     constexpr int PVNtPerWarp   = D / (kGqaPrefillI8DConsumers * 8);
@@ -159,19 +162,22 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
     constexpr unsigned FullMask = 0xffffffffu;
 
     static_assert(GroupKc == 2);
-    static_assert(PVNtPerWarp == 8);
+    static_assert(PVNtPerWarp == 8 || PVNtPerWarp == 4);
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
     std::int8_t* q_i8 = reinterpret_cast<std::int8_t*>(smem_raw);
-    float* q_scale    = reinterpret_cast<float*>(q_i8 + kGqaPrefillI8QBytes);
-    std::int8_t* k_i8 = reinterpret_cast<std::int8_t*>(reinterpret_cast<unsigned char*>(q_scale) +
-                                                       kGqaPrefillI8QScaleBytes);
-    std::int8_t* v_i8 = k_i8 + kGqaPrefillI8KBytes;
-    __half* v_f16     = reinterpret_cast<__half*>(v_i8 + kGqaPrefillI8VBytes);
-    __half* p_s       = reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(v_f16) +
-                                                  kGqaPrefillI8VStageBytes);
+    float* q_scale    = reinterpret_cast<float*>(q_i8 + GqaPrefillI8Smem<Geometry>::QBytes);
+    std::int8_t* k_i8 =
+        reinterpret_cast<std::int8_t*>(reinterpret_cast<unsigned char*>(q_scale) +
+                                       GqaPrefillI8Smem<Geometry>::QScaleBytes);
+    std::int8_t* v_i8 = k_i8 + GqaPrefillI8Smem<Geometry>::KBytes;
+    __half* v_f16     = reinterpret_cast<__half*>(v_i8 + GqaPrefillI8Smem<Geometry>::VBytes);
+    __half* p_s =
+        reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(v_f16) +
+                                  GqaPrefillI8Smem<Geometry>::VStageBytes);
     __half* k_scale_s =
-        reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(p_s) + kGqaPrefillI8PBytes);
+        reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(p_s) +
+                                  GqaPrefillI8Smem<Geometry>::PBytes);
     __half* v_scale_s    = k_scale_s + Bc * Groups;
     float* alpha_s       = reinterpret_cast<float*>(v_scale_s + Bc * Groups);
     float* final_l_s     = alpha_s + Br;
@@ -190,7 +196,9 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
 
     const int tile_rows     = min(Br, tokens - q0);
     const int max_query_abs = base_pos + q0 + tile_rows - 1;
-    const int key_blocks    = max_query_abs / Bc + 1;
+    const int min_key       = window > 0 ? max(base_pos + q0 - window + 1, 0) : 0;
+    const int n_block_min   = min_key / Bc;
+    const int n_block_max   = max_query_abs / Bc + 1;
 
     // Quantize Q cooperatively. One warp owns one (row, 64-d group) at a time.
     for (int unit = warp; unit < Br * Groups; unit += kGqaPrefillI8Warps) {
@@ -208,8 +216,8 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
         absmax          = warp_max(absmax, FullMask);
         const float qs  = absmax > 0.0f ? absmax / 127.0f : 0.0f;
         const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
-        gqa_prefill_i8_store_swz(q_i8, row, d0, gqa_kv_quant_code(x0, inv));
-        gqa_prefill_i8_store_swz(q_i8, row, d1, gqa_kv_quant_code(x1, inv));
+        gqa_prefill_i8_store_swz<Geometry>(q_i8, row, d0, gqa_kv_quant_code(x0, inv));
+        gqa_prefill_i8_store_swz<Geometry>(q_i8, row, d1, gqa_kv_quant_code(x1, inv));
         if (lane == 0) { q_scale[row * Groups + grp] = qs; }
     }
     __syncthreads();
@@ -219,8 +227,9 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
             const int key = tile_k0 + key_l;
             __half* kd    = &k_scale_s[key_l * Groups];
             __half* vd    = &v_scale_s[key_l * Groups];
-            if (key <= max_query_abs) {
-                const std::int64_t off = gqa_kv_quant_scale_index(kv_head, 0, key, padded_context);
+            if (key >= min_key && key <= max_query_abs) {
+                const std::int64_t off =
+                    gqa_kv_quant_scale_index<Geometry>(kv_head, 0, key, padded_context);
                 ninfer::ops::cp_async<8>(kd, &cache_k_scale[off]);
                 ninfer::ops::cp_async<8>(vd, &cache_v_scale[off]);
             } else {
@@ -236,8 +245,9 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
             const int key   = tile_k0 + key_l;
             std::int8_t* kd = &k_i8[(key_l * DB16 + gqa_prefill_swz(key_l, dc * 8)) * 2];
             std::int8_t* vd = &v_i8[key_l * D + d];
-            if (key <= max_query_abs) {
-                const std::int64_t off = gqa_kv_quant_code_index(kv_head, d, key, padded_context);
+            if (key >= min_key && key <= max_query_abs) {
+                const std::int64_t off =
+                    gqa_kv_quant_code_index<Geometry>(kv_head, d, key, padded_context);
                 cp_async<16, Cache::cg>(kd, &cache_k[off]);
                 cp_async<16, Cache::cg>(vd, &cache_v[off]);
             } else {
@@ -248,7 +258,7 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
         ninfer::ops::cp_commit();
     };
 
-    issue_kv_tile(0);
+    issue_kv_tile(n_block_min * Bc);
     ninfer::ops::cp_wait<0>();
     __syncthreads();
 
@@ -263,8 +273,9 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
 
     // Keeping exactly two group scales live is the spill-free 120-register point on SM120.
     // Groups 2/3 reload per key tile; retaining all four creates an 8-byte stack frame.
-    float q_scale_r0[Groups - 2];
-    float q_scale_r1[Groups - 2];
+    // D128 (Groups == 2) has no live register set and reloads both groups per tile.
+    float q_scale_r0[Groups > 2 ? Groups - 2 : 1];
+    float q_scale_r1[Groups > 2 ? Groups - 2 : 1];
     if (warp < ProducerWarps) {
         const int scale_row0 = warp * 16 + gid;
         const int scale_row1 = scale_row0 + 8;
@@ -288,7 +299,7 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
     float running_l0     = 0.0f;
     float running_l1     = 0.0f;
     const float scale_l2 = scale * Log2E;
-    for (int kb = 0; kb < key_blocks; ++kb) {
+    for (int kb = n_block_min; kb < n_block_max; ++kb) {
         const int k0 = kb * Bc;
         if (warp < ProducerWarps) {
             const int row_base = warp * 16;
@@ -359,7 +370,10 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
             const int row1             = row0 + 8;
             const int qabs0            = row0 < tile_rows ? base_pos + q0 + row0 : -1;
             const int qabs1            = row1 < tile_rows ? base_pos + q0 + row1 : -1;
-            const bool full_score_tile = q0 + Br <= tokens && k0 + Bc - 1 <= base_pos + q0;
+            const int qlo0             = window > 0 ? qabs0 - window + 1 : 0;
+            const int qlo1             = window > 0 ? qabs1 - window + 1 : 0;
+            const bool full_score_tile = q0 + Br <= tokens && k0 + Bc - 1 <= base_pos + q0 &&
+                                         (window <= 0 || k0 >= max_query_abs - window + 1);
             float bm0                  = -CUDART_INF_F;
             float bm1                  = -CUDART_INF_F;
 #pragma unroll
@@ -367,10 +381,10 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
                 const int key0 = k0 + nt * 8 + 2 * lid;
                 const int key1 = key0 + 1;
                 if (!full_score_tile) {
-                    score[nt][0] = key0 <= qabs0 ? score[nt][0] : -CUDART_INF_F;
-                    score[nt][1] = key1 <= qabs0 ? score[nt][1] : -CUDART_INF_F;
-                    score[nt][2] = key0 <= qabs1 ? score[nt][2] : -CUDART_INF_F;
-                    score[nt][3] = key1 <= qabs1 ? score[nt][3] : -CUDART_INF_F;
+                    score[nt][0] = key0 <= qabs0 && key0 >= qlo0 ? score[nt][0] : -CUDART_INF_F;
+                    score[nt][1] = key1 <= qabs0 && key1 >= qlo0 ? score[nt][1] : -CUDART_INF_F;
+                    score[nt][2] = key0 <= qabs1 && key0 >= qlo1 ? score[nt][2] : -CUDART_INF_F;
+                    score[nt][3] = key1 <= qabs1 && key1 >= qlo1 ? score[nt][3] : -CUDART_INF_F;
                 }
                 bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));
                 bm1 = fmaxf(bm1, fmaxf(score[nt][2], score[nt][3]));
@@ -445,7 +459,7 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
         }
         __syncthreads();
 
-        const bool has_next = kb + 1 < key_blocks;
+        const bool has_next = kb + 1 < n_block_max;
         if (has_next) { issue_kv_tile((kb + 1) * Bc); }
 
         const int row_tile = warp % kGqaPrefillI8RowTiles;

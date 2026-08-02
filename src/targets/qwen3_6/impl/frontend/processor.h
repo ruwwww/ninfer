@@ -84,6 +84,8 @@ struct ProcessorOptions {
     double video_fps                       = 2.0;
     int video_min_frames                   = 4;
     int video_max_frames                   = 768;
+    bool vision_enabled                    = true;
+    std::string render_prefix;
 };
 
 struct ProcessedInput {

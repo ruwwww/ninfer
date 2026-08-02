@@ -349,7 +349,7 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
 
 Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
-    ops::gqa_attention(qn, kn, v, positions, kAttnScale, mtp_kv_->layer_view(0), envelope, work_, a,
+    ops::gqa_attention(qn, kn, v, positions, kAttnScale, 0, mtp_kv_->layer_view(0), envelope, work_, a,
                        256, s);
     ops::sigmoid_mul(gate, a, s);
 
@@ -476,8 +476,8 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s);
 
 Tensor a = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_q, 1});
-        ops::gqa_attention_cached(qn, last_position, kAttnScale, mtp_kv_->layer_view(0), envelope,
-                                   work_, a, 256, s);
+        ops::gqa_attention_cached(qn, last_position, kAttnScale, 0, mtp_kv_->layer_view(0),
+                                   envelope, work_, a, 256, s);
         ops::sigmoid_mul(gate, a, s);
 
         Tensor o = work_.alloc(DType::BF16, {kCfg.hidden, 1});
@@ -692,7 +692,7 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
 
 Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
-    ops::gqa_attention(qn, kn, v, cache_positions, kAttnScale, kv_.layer_view(fidx),
+    ops::gqa_attention(qn, kn, v, cache_positions, kAttnScale, 0, kv_.layer_view(fidx),
                         *active_gqa_envelope_, work_, a, 256, s);
     ops::sigmoid_mul(gate, a, s);
 

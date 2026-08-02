@@ -50,6 +50,11 @@ def _moe_recipes(source_prefix: str, object_prefix: str) -> tuple[TensorRecipe, 
             object_prefix + "router_gate",
             source(source_prefix + "gate.weight", (256, 2048)),
         ),
+        # Router correction bias: direct map (exactly zero for this checkpoint)
+        TensorRecipe(
+            object_prefix + "router_bias",
+            source(source_prefix + "experts.e_score_correction_bias", (256,)),
+        ),
         # Routed gate/up: stack all 256 experts' gate+up, concat along intermediate dim, flatten
         TensorRecipe(
             object_prefix + "routed_gate_up",
@@ -146,7 +151,7 @@ def _build_text_recipes() -> tuple[TensorRecipe, ...]:
                 ),
                 TensorRecipe(
                     object_prefix + "attention/g_proj",
-                    source(source_prefix + "self_attn.g_proj.weight", (q_heads,)),
+                    source(source_prefix + "self_attn.g_proj.weight", (q_heads, 2048)),
                 ),
                 TensorRecipe(
                     object_prefix + "attention/o_proj",

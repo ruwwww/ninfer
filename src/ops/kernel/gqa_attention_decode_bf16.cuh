@@ -19,15 +19,15 @@ template <typename Geometry, int TokenTile, int WarpsPerCta, typename CacheInput
 __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_kernel(
     const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
     __nv_bfloat16* cache_v, std::int32_t tokens, std::int32_t padded_context,
-    std::int32_t max_context, float scale, __nv_bfloat16* partial_acc, float* partial_m,
-    float* partial_l) {
+    std::int32_t max_context, float scale, std::int32_t window, __nv_bfloat16* partial_acc,
+    float* partial_m, float* partial_l) {
     static_assert(TokenTile >= 1 && TokenTile <= 6);
     static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
 
     constexpr int Wc            = WarpsPerCta;
     constexpr int Br            = Wc * 16;
     constexpr int Bc            = 32;
-    constexpr int D             = kGqaHeadDim;
+    constexpr int D             = Geometry::HeadDim;
     constexpr int Threads       = Wc * 32;
     constexpr int QKNt          = Bc / 8;
     constexpr int QKKs          = D / 16;
@@ -88,15 +88,18 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
         return;
     }
 
-    const int window = last_pos + 1;
+    int key_floor = 0;
+    int key_count = 0;
+    gqa_small_t_window_range(window, first_pos, last_pos, tokens, key_floor, key_count);
     const int active_split_count =
-        gqa_small_t_active_splits<Geometry, false>(window, split_count, TokenTile);
+        gqa_small_t_active_splits<Geometry, false>(key_count, split_count, TokenTile);
     if (split >= active_split_count) { return; }
 
-    const int kps         = div_up(window, active_split_count);
-    const int split_start = split * kps;
+    const int kps         = div_up(key_count, active_split_count);
+    const int split_start = key_floor + split * kps;
     const int split_limit = split_start + kps;
-    const int split_end   = (split_limit < window) ? split_limit : window;
+    const int split_end   = (split_limit < key_floor + key_count) ? split_limit
+                                                                  : key_floor + key_count;
     if (split_start >= split_end) {
         write_neutral();
         return;
@@ -110,8 +113,8 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             const int d     = (chunk - token * (D / 8)) * 8;
             const int p_tok = pos[token];
             if (p_tok >= split_start && p_tok < split_end && p_tok >= 0 && p_tok < max_context) {
-                const std::int64_t new_off   = gqa_kv_new_index<Geometry>(kv_head, d, token);
-                const std::int64_t cache_off = gqa_cache_index(kv_head, d, p_tok, padded_context);
+        const std::int64_t new_off   = gqa_kv_new_index<Geometry>(kv_head, d, token);
+        const std::int64_t cache_off = gqa_cache_index<Geometry>(kv_head, d, p_tok, padded_context);
                 store_vec(&cache_k[cache_off], load_vec<int4>(&input.k[new_off]));
                 store_vec(&cache_v[cache_off], load_vec<int4>(&input.v[new_off]));
             }
@@ -185,12 +188,12 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                         ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
                         ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
                     } else {
-                        const std::int64_t off = gqa_cache_index(kv_head, d, key, padded_context);
+                        const std::int64_t off = gqa_cache_index<Geometry>(kv_head, d, key, padded_context);
                         ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
                         ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
                     }
                 } else {
-                    const std::int64_t off = gqa_cache_index(kv_head, d, key, padded_context);
+                    const std::int64_t off = gqa_cache_index<Geometry>(kv_head, d, key, padded_context);
                     ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
                     ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
                 }
@@ -226,6 +229,8 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
         gqa_small_t_tc_row_to_qt<Geometry>(row1, tokens, kv_head, q_head1, token1);
         const int qabs0 = (row0 < row_count) ? pos[token0] : -1;
         const int qabs1 = (row1 < row_count) ? pos[token1] : -1;
+        const int qlo0  = window > 0 ? qabs0 - window + 1 : 0;
+        const int qlo1  = window > 0 ? qabs1 - window + 1 : 0;
 
         float bm0 = -CUDART_INF_F, bm1 = -CUDART_INF_F;
 #pragma unroll
@@ -234,16 +239,20 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             const int col1 = col0 + 1;
             const int key0 = k0 + col0;
             const int key1 = col1 + k0;
-            score[nt][0]   = (row0 < row_count && key0 < split_end && key0 <= qabs0)
+            score[nt][0]   = (row0 < row_count && key0 < split_end && key0 <= qabs0 &&
+                              key0 >= qlo0)
                                  ? score[nt][0] * scale
                                  : -CUDART_INF_F;
-            score[nt][1]   = (row0 < row_count && key1 < split_end && key1 <= qabs0)
+            score[nt][1]   = (row0 < row_count && key1 < split_end && key1 <= qabs0 &&
+                              key1 >= qlo0)
                                  ? score[nt][1] * scale
                                  : -CUDART_INF_F;
-            score[nt][2]   = (row1 < row_count && key0 < split_end && key0 <= qabs1)
+            score[nt][2]   = (row1 < row_count && key0 < split_end && key0 <= qabs1 &&
+                              key0 >= qlo1)
                                  ? score[nt][2] * scale
                                  : -CUDART_INF_F;
-            score[nt][3]   = (row1 < row_count && key1 < split_end && key1 <= qabs1)
+            score[nt][3]   = (row1 < row_count && key1 < split_end && key1 <= qabs1 &&
+                              key1 >= qlo1)
                                  ? score[nt][3] * scale
                                  : -CUDART_INF_F;
             bm0            = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));

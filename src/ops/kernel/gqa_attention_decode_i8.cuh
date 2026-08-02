@@ -62,17 +62,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                                               std::int8_t* cache_v_i8, __half* cache_k_scale,
                                               __half* cache_v_scale, std::int32_t padded_context,
                                               std::int32_t max_context, float scale,
-                                              __nv_bfloat16* partial_acc, float* partial_m,
-                                              float* partial_l) {
+                                              std::int32_t window, __nv_bfloat16* partial_acc,
+                                              float* partial_m, float* partial_l) {
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
     constexpr int Br                   = RowTiles * 16;
     constexpr int Bc                   = KeyBlock;
-    constexpr int D                    = kGqaHeadDim;
+    constexpr int D                    = Geometry::HeadDim;
     constexpr int DB16                 = D / 2;
     constexpr int Threads              = Wc * 32;
-    constexpr int Groups               = kGqaKvQuantGroups;
+    constexpr int Groups               = Geometry::HeadDim / kGqaKvQuantGroup;
     constexpr int GroupKc              = kGqaKvQuantGroup / 32;
     constexpr int QKKs                 = D / 32;
     constexpr int QKNt                 = Bc / 8;
@@ -88,7 +88,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     static_assert(Bc == 32 || Bc == 64);
     static_assert(RowTiles >= 1 && RowTiles <= 3);
     static_assert(Wc % RowTiles == 0);
-    static_assert(PVNtPerWarp == 2 || PVNtPerWarp == 4 || PVNtPerWarp == 8 || PVNtPerWarp == 16);
+    static_assert(PVNtPerWarp == 1 || PVNtPerWarp == 2 || PVNtPerWarp == 4 || PVNtPerWarp == 8 ||
+                  PVNtPerWarp == 16);
     static_assert(QKKs == Groups * GroupKc);
 
     // Keep Q in a compact dedicated tile so the producer can reload one
@@ -151,15 +152,18 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         return;
     }
 
-    const int window = last_pos + 1;
+    int key_floor = 0;
+    int key_count = 0;
+    gqa_small_t_window_range(window, first_pos, last_pos, TokenTile, key_floor, key_count);
     const int active_split_count =
-        gqa_small_t_active_splits<Geometry, true>(window, split_count, TokenTile);
+        gqa_small_t_active_splits<Geometry, true>(key_count, split_count, TokenTile);
     if (split >= active_split_count) { return; }
 
-    const int kps         = div_up(window, active_split_count);
-    const int split_start = split * kps;
+    const int kps         = div_up(key_count, active_split_count);
+    const int split_start = key_floor + split * kps;
     const int split_limit = split_start + kps;
-    const int split_end   = (split_limit < window) ? split_limit : window;
+    const int split_end   = (split_limit < key_floor + key_count) ? split_limit
+                                                                  : key_floor + key_count;
     if (split_start >= split_end) {
         write_neutral();
         return;
@@ -190,17 +194,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const float vs          = __half2float(vsh);
             const float k_inv       = ks > 0.0f ? 1.0f / ks : 0.0f;
             const float v_inv       = vs > 0.0f ? 1.0f / vs : 0.0f;
-            cache_k_i8[gqa_kv_quant_code_index(kv_head, d0, position, padded_context)] =
+            cache_k_i8[gqa_kv_quant_code_index<Geometry>(kv_head, d0, position, padded_context)] =
                 gqa_kv_quant_code(kv0, k_inv);
-            cache_k_i8[gqa_kv_quant_code_index(kv_head, d1, position, padded_context)] =
+            cache_k_i8[gqa_kv_quant_code_index<Geometry>(kv_head, d1, position, padded_context)] =
                 gqa_kv_quant_code(kv1, k_inv);
-            cache_v_i8[gqa_kv_quant_code_index(kv_head, d0, position, padded_context)] =
+            cache_v_i8[gqa_kv_quant_code_index<Geometry>(kv_head, d0, position, padded_context)] =
                 gqa_kv_quant_code(vv0, v_inv);
-            cache_v_i8[gqa_kv_quant_code_index(kv_head, d1, position, padded_context)] =
+            cache_v_i8[gqa_kv_quant_code_index<Geometry>(kv_head, d1, position, padded_context)] =
                 gqa_kv_quant_code(vv1, v_inv);
             if (lane == 0) {
                 const std::int64_t so =
-                    gqa_kv_quant_scale_index(kv_head, grp, position, padded_context);
+                    gqa_kv_quant_scale_index<Geometry>(kv_head, grp, position, padded_context);
                 cache_k_scale[so] = ksh;
                 cache_v_scale[so] = vsh;
             }
@@ -274,7 +278,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         for (int key_l = tid; key_l < Bc; key_l += Threads) {
             const int key = tile_k0 + key_l;
             if (key < split_end) {
-                const std::int64_t off = gqa_kv_quant_scale_index(kv_head, 0, key, padded_context);
+                const std::int64_t off = gqa_kv_quant_scale_index<Geometry>(kv_head, 0, key, padded_context);
                 ninfer::ops::cp_async<8>(&k_scale_s[key_l * Groups], &cache_k_scale[off]);
                 ninfer::ops::cp_async<8>(&v_scale_s[key_l * Groups], &cache_v_scale[off]);
             }
@@ -286,7 +290,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int d     = dc * 16;
             const int key   = tile_k0 + key_l;
             if (key < split_end) {
-                const std::int64_t off = gqa_kv_quant_code_index(kv_head, d, key, padded_context);
+                const std::int64_t off = gqa_kv_quant_code_index<Geometry>(kv_head, d, key, padded_context);
                 std::int8_t* dst       = &k_i8[key_l * D + gqa_small_t_tc_swz(key_l, dc * 8) * 2];
                 ninfer::ops::cp_async<16>(dst, &cache_k_i8[off]);
                 ninfer::ops::cp_async<16>(&v_i8[key_l * D + d], &cache_v_i8[off]);
@@ -369,6 +373,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             gqa_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head1, token1);
             const int qabs0 = (row0 < RowCount) ? pos[token0] : -1;
             const int qabs1 = (row1 < RowCount) ? pos[token1] : -1;
+            const int qlo0  = window > 0 ? qabs0 - window + 1 : 0;
+            const int qlo1  = window > 0 ? qabs1 - window + 1 : 0;
             float bm0 = -CUDART_INF_F, bm1 = -CUDART_INF_F;
 #pragma unroll
             for (int nt = 0; nt < QKNt; ++nt) {
@@ -376,16 +382,20 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const int col1 = col0 + 1;
                 const int key0 = k0 + col0;
                 const int key1 = k0 + col1;
-                score[nt][0]   = (row0 < RowCount && key0 < split_end && key0 <= qabs0)
+                score[nt][0]   = (row0 < RowCount && key0 < split_end && key0 <= qabs0 &&
+                                  key0 >= qlo0)
                                      ? score[nt][0] * scale
                                      : -CUDART_INF_F;
-                score[nt][1]   = (row0 < RowCount && key1 < split_end && key1 <= qabs0)
+                score[nt][1]   = (row0 < RowCount && key1 < split_end && key1 <= qabs0 &&
+                                  key1 >= qlo0)
                                      ? score[nt][1] * scale
                                      : -CUDART_INF_F;
-                score[nt][2]   = (row1 < RowCount && key0 < split_end && key0 <= qabs1)
+                score[nt][2]   = (row1 < RowCount && key0 < split_end && key0 <= qabs1 &&
+                                  key0 >= qlo1)
                                      ? score[nt][2] * scale
                                      : -CUDART_INF_F;
-                score[nt][3]   = (row1 < RowCount && key1 < split_end && key1 <= qabs1)
+                score[nt][3]   = (row1 < RowCount && key1 < split_end && key1 <= qabs1 &&
+                                  key1 >= qlo1)
                                      ? score[nt][3] * scale
                                      : -CUDART_INF_F;
                 bm0            = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));

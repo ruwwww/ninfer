@@ -19,10 +19,9 @@ using namespace ninfer::test;
 
 namespace {
 
-constexpr std::int32_t kHeadDim       = 256;
 constexpr std::int32_t kQuantGroup    = 64;
-constexpr std::int32_t kQuantGroups   = kHeadDim / kQuantGroup;
-constexpr float kAttentionScale       = 0.0625f;
+constexpr float kAttentionScale256    = 0.0625f;
+constexpr float kAttentionScale128    = 0.08838835f;
 constexpr std::uint16_t kOutputCanary = 0x7fc1u;
 
 // The Op has two registered compute profiles. A1 and A3 use the same criterion for a given
@@ -43,19 +42,27 @@ struct Geometry {
     const char* name;
     std::int32_t q_heads;
     std::int32_t kv_heads;
+    std::int32_t head_dim;
 
     [[nodiscard]] std::int32_t query_group() const { return q_heads / kv_heads; }
+    [[nodiscard]] std::int32_t quant_groups() const { return head_dim / kQuantGroup; }
+    [[nodiscard]] float attention_scale() const {
+        return head_dim == 128 ? kAttentionScale128 : kAttentionScale256;
+    }
 };
 
 constexpr Geometry kGeometries[] = {
-    {"qwen3_6_27b", 24, 4},
-    {"qwen3_6_35b_a3b", 16, 2},
+    {"qwen3_6_27b", 24, 4, 256},
+    {"qwen3_6_35b_a3b", 16, 2, 256},
+    {"laguna_xs_2_1_full", 48, 8, 128},
+    {"laguna_xs_2_1_swa", 64, 8, 128},
 };
 
 struct AttentionCase {
     std::int32_t tokens;
     std::int32_t base;
     std::uint32_t envelope_max;
+    std::int32_t window;
     std::uint32_t seed;
 };
 
@@ -64,7 +71,7 @@ std::int32_t align_up_128(std::int32_t value) { return ((value + 127) / 128) * 1
 std::size_t q_index(const Geometry& geometry, std::int32_t head, std::int32_t d,
                     std::int32_t token) {
     return static_cast<std::size_t>(d) +
-           static_cast<std::size_t>(kHeadDim) *
+           static_cast<std::size_t>(geometry.head_dim) *
                (static_cast<std::size_t>(head) +
                 static_cast<std::size_t>(geometry.q_heads) * static_cast<std::size_t>(token));
 }
@@ -72,7 +79,7 @@ std::size_t q_index(const Geometry& geometry, std::int32_t head, std::int32_t d,
 std::size_t kv_input_index(const Geometry& geometry, std::int32_t head, std::int32_t d,
                            std::int32_t token) {
     return static_cast<std::size_t>(d) +
-           static_cast<std::size_t>(kHeadDim) *
+           static_cast<std::size_t>(geometry.head_dim) *
                (static_cast<std::size_t>(head) +
                 static_cast<std::size_t>(geometry.kv_heads) * static_cast<std::size_t>(token));
 }
@@ -80,27 +87,28 @@ std::size_t kv_input_index(const Geometry& geometry, std::int32_t head, std::int
 std::size_t cache_index(const Geometry& geometry, std::int32_t padded_context, std::int32_t head,
                         std::int32_t position, std::int32_t d) {
     return static_cast<std::size_t>(d) +
-           static_cast<std::size_t>(kHeadDim) *
+           static_cast<std::size_t>(geometry.head_dim) *
                (static_cast<std::size_t>(position) +
                 static_cast<std::size_t>(padded_context) * static_cast<std::size_t>(head));
 }
 
 std::size_t scale_index(const Geometry& geometry, std::int32_t padded_context, std::int32_t head,
                         std::int32_t position, std::int32_t group) {
-    (void)geometry;
     return static_cast<std::size_t>(group) +
-           static_cast<std::size_t>(kQuantGroups) *
+           static_cast<std::size_t>(geometry.quant_groups()) *
                (static_cast<std::size_t>(position) +
                 static_cast<std::size_t>(padded_context) * static_cast<std::size_t>(head));
 }
 
 std::size_t cache_elements(const Geometry& geometry, std::int32_t padded_context) {
-    return static_cast<std::size_t>(kHeadDim) * static_cast<std::size_t>(padded_context) *
+    return static_cast<std::size_t>(geometry.head_dim) *
+           static_cast<std::size_t>(padded_context) *
            static_cast<std::size_t>(geometry.kv_heads);
 }
 
 std::size_t scale_elements(const Geometry& geometry, std::int32_t padded_context) {
-    return static_cast<std::size_t>(kQuantGroups) * static_cast<std::size_t>(padded_context) *
+    return static_cast<std::size_t>(geometry.quant_groups()) *
+           static_cast<std::size_t>(padded_context) *
            static_cast<std::size_t>(geometry.kv_heads);
 }
 
@@ -245,7 +253,7 @@ HostCache make_cache(const Geometry& geometry, DType dtype, std::int32_t max_con
     cache.v_scale.assign(scales, 0);
     for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
         for (std::int32_t position = 0; position < padded_context; ++position) {
-            for (std::int32_t group = 0; group < kQuantGroups; ++group) {
+            for (std::int32_t group = 0; group < geometry.quant_groups(); ++group) {
                 const std::int32_t d   = group * kQuantGroup;
                 const std::size_t code = cache_index(geometry, padded_context, head, position, d);
                 const std::size_t scale =
@@ -265,7 +273,7 @@ void append_cache(HostCache& cache, const std::vector<float>& k, const std::vect
         const std::int32_t position = positions[static_cast<std::size_t>(token)];
         for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
             if (cache.dtype == DType::BF16) {
-                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                for (std::int32_t d = 0; d < geometry.head_dim; ++d) {
                     const std::size_t source = kv_input_index(geometry, head, d, token);
                     const std::size_t target =
                         cache_index(geometry, cache.padded_context, head, position, d);
@@ -275,7 +283,7 @@ void append_cache(HostCache& cache, const std::vector<float>& k, const std::vect
                 continue;
             }
 
-            for (std::int32_t group = 0; group < kQuantGroups; ++group) {
+            for (std::int32_t group = 0; group < geometry.quant_groups(); ++group) {
                 const std::int32_t d     = group * kQuantGroup;
                 const std::size_t source = kv_input_index(geometry, head, d, token);
                 const std::size_t target =
@@ -305,10 +313,11 @@ double cache_value(const HostCache& cache, bool key, std::int32_t head, std::int
 }
 
 std::vector<double> ideal_attention(const std::vector<float>& q, const HostCache& cache,
-                                    const std::vector<std::int32_t>& positions) {
+                                    const std::vector<std::int32_t>& positions,
+                                    std::int32_t window) {
     const Geometry& geometry  = cache.geometry;
     const std::int32_t tokens = static_cast<std::int32_t>(positions.size());
-    std::vector<double> output(static_cast<std::size_t>(kHeadDim) *
+    std::vector<double> output(static_cast<std::size_t>(geometry.head_dim) *
                                static_cast<std::size_t>(geometry.q_heads) *
                                static_cast<std::size_t>(tokens));
 
@@ -316,36 +325,43 @@ std::vector<double> ideal_attention(const std::vector<float>& q, const HostCache
     std::vector<double> probabilities(scores.size());
     for (std::int32_t token = 0; token < tokens; ++token) {
         const std::int32_t visible = positions[static_cast<std::size_t>(token)] + 1;
+        const std::int32_t floor   = window > 0 ? positions[static_cast<std::size_t>(token)] -
+                                                      window + 1
+                                                 : 0;
         for (std::int32_t q_head = 0; q_head < geometry.q_heads; ++q_head) {
             const std::int32_t kv_head = q_head / geometry.query_group();
             double max_score           = -std::numeric_limits<double>::infinity();
             for (std::int32_t position = 0; position < visible; ++position) {
+                if (position < floor) { continue; }
                 double dot = 0.0;
-                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                for (std::int32_t d = 0; d < geometry.head_dim; ++d) {
                     dot += static_cast<double>(q[q_index(geometry, q_head, d, token)]) *
                            cache_value(cache, true, kv_head, position, d);
                 }
-                const double score = dot * static_cast<double>(kAttentionScale);
+                const double score = dot * static_cast<double>(geometry.attention_scale());
                 scores[static_cast<std::size_t>(position)] = score;
                 max_score                                  = std::max(max_score, score);
             }
 
             double sum = 0.0;
             for (std::int32_t position = 0; position < visible; ++position) {
+                if (position < floor) { continue; }
                 const double probability =
                     std::exp(scores[static_cast<std::size_t>(position)] - max_score);
                 probabilities[static_cast<std::size_t>(position)] = probability;
                 sum += probability;
             }
             for (std::int32_t position = 0; position < visible; ++position) {
-                probabilities[static_cast<std::size_t>(position)] /= sum;
+                if (position >= floor) { probabilities[static_cast<std::size_t>(position)] /= sum; }
             }
 
-            for (std::int32_t d = 0; d < kHeadDim; ++d) {
+            for (std::int32_t d = 0; d < geometry.head_dim; ++d) {
                 double value = 0.0;
                 for (std::int32_t position = 0; position < visible; ++position) {
-                    value += probabilities[static_cast<std::size_t>(position)] *
-                             cache_value(cache, false, kv_head, position, d);
+                    if (position >= floor) {
+                        value += probabilities[static_cast<std::size_t>(position)] *
+                                 cache_value(cache, false, kv_head, position, d);
+                    }
                 }
                 output[q_index(geometry, q_head, d, token)] = value;
             }
@@ -389,18 +405,22 @@ public:
 
     KVCacheLayerView view() {
         KVCacheLayerView result;
-        result.k = Tensor(k_.data(), dtype_, {kHeadDim, padded_context_, geometry_.kv_heads});
-        result.v = Tensor(v_.data(), dtype_, {kHeadDim, padded_context_, geometry_.kv_heads});
+        result.k =
+            Tensor(k_.data(), dtype_, {geometry_.head_dim, padded_context_, geometry_.kv_heads});
+        result.v =
+            Tensor(v_.data(), dtype_, {geometry_.head_dim, padded_context_, geometry_.kv_heads});
         result.max_context    = static_cast<std::uint32_t>(max_context_);
         result.padded_context = static_cast<std::uint32_t>(padded_context_);
         result.num_kv_heads   = geometry_.kv_heads;
-        result.head_dim       = kHeadDim;
+        result.head_dim       = geometry_.head_dim;
         result.dtype          = dtype_;
         if (dtype_ == DType::I8) {
             result.k_scale     = Tensor(k_scale_.data(), DType::FP16,
-                                        {kQuantGroups, padded_context_, geometry_.kv_heads});
+                                        {geometry_.quant_groups(), padded_context_,
+                                         geometry_.kv_heads});
             result.v_scale     = Tensor(v_scale_.data(), DType::FP16,
-                                        {kQuantGroups, padded_context_, geometry_.kv_heads});
+                                        {geometry_.quant_groups(), padded_context_,
+                                         geometry_.kv_heads});
             result.quant_group = kQuantGroup;
         }
         return result;
@@ -509,7 +529,8 @@ int run_append_case(const Geometry& geometry, DType dtype, std::uint32_t seed) {
     constexpr std::int32_t base        = 5;
     constexpr std::int32_t max_context = 16;
     const std::size_t elements =
-        static_cast<std::size_t>(kHeadDim) * static_cast<std::size_t>(geometry.kv_heads) * tokens;
+        static_cast<std::size_t>(geometry.head_dim) * static_cast<std::size_t>(geometry.kv_heads) *
+        tokens;
     std::vector<float> k = make_bf16_values(elements, seed, -0.25f, 0.25f);
     std::vector<float> v = make_bf16_values(elements, seed + 1u, -1.0f, 1.0f);
     inject_codec_edges(geometry, tokens, k, v);
@@ -528,11 +549,11 @@ int run_append_case(const Geometry& geometry, DType dtype, std::uint32_t seed) {
     dk.copy_from_host(k_bits.data(), k_bits.size() * sizeof(std::uint16_t));
     dv.copy_from_host(v_bits.data(), v_bits.size() * sizeof(std::uint16_t));
     dpositions.copy_from_host(positions.data(), positions.size() * sizeof(std::int32_t));
-    Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
-    Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+    Tensor tk(dk.data(), DType::BF16, {geometry.head_dim, geometry.kv_heads, tokens});
+    Tensor tv(dv.data(), DType::BF16, {geometry.head_dim, geometry.kv_heads, tokens});
     Tensor tp(dpositions.data(), DType::I32, {tokens});
 
-    ops::gqa_kv_append(tk, tv, tp, cache.view(), kHeadDim, nullptr);
+    ops::gqa_kv_append(tk, tv, tp, cache.view(), geometry.head_dim, nullptr);
     cuda_synchronize();
 
     const std::string label =
@@ -549,10 +570,10 @@ int run_a1_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
-    const std::size_t q_elements = static_cast<std::size_t>(kHeadDim) *
+    const std::size_t q_elements = static_cast<std::size_t>(geometry.head_dim) *
                                    static_cast<std::size_t>(geometry.q_heads) *
                                    static_cast<std::size_t>(test_case.tokens);
-    const std::size_t kv_elements = static_cast<std::size_t>(kHeadDim) *
+    const std::size_t kv_elements = static_cast<std::size_t>(geometry.head_dim) *
                                     static_cast<std::size_t>(geometry.kv_heads) *
                                     static_cast<std::size_t>(test_case.tokens);
     std::vector<float> q = make_bf16_values(q_elements, test_case.seed, -0.25f, 0.25f);
@@ -567,7 +588,8 @@ int run_a1_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     const HostCache initial = make_cache(geometry, dtype, max_context, test_case.seed + 10u);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
-    const std::vector<double> reference = ideal_attention(q, expected, positions);
+    const std::vector<double> reference =
+        ideal_attention(q, expected, positions, test_case.window);
     DeviceCache cache(initial);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -585,20 +607,22 @@ int run_a1_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     std::vector<std::uint16_t> output_canary(q_bits.size(), kOutputCanary);
     dout.copy_from_host(output_canary.data(), output_canary.size() * sizeof(std::uint16_t));
 
-    Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
-    Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, test_case.tokens});
-    Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, test_case.tokens});
+    Tensor tq(dq.data(), DType::BF16, {geometry.head_dim, geometry.q_heads, test_case.tokens});
+    Tensor tk(dk.data(), DType::BF16, {geometry.head_dim, geometry.kv_heads, test_case.tokens});
+    Tensor tv(dv.data(), DType::BF16, {geometry.head_dim, geometry.kv_heads, test_case.tokens});
     Tensor tp(dp.data(), DType::I32, {test_case.tokens});
-    Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
+    Tensor tout(dout.data(), DType::BF16, {geometry.head_dim, geometry.q_heads, test_case.tokens});
     const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
                                              test_case.envelope_max};
-const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
-         geometry.q_heads, kHeadDim, dtype, envelope, test_case.tokens, test_case.tokens);
+    std::cerr << ">> a1 " << geometry.name << " T=" << test_case.tokens
+              << " base=" << test_case.base << " w=" << test_case.window << std::flush;
+    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, geometry.head_dim, dtype, envelope, test_case.tokens, test_case.tokens);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
-    ops::gqa_attention(tq, tk, tv, tp, kAttentionScale, cache.view(), envelope, workspace, tout,
-                       kHeadDim, nullptr);
+    ops::gqa_attention(tq, tk, tv, tp, geometry.attention_scale(), test_case.window, cache.view(),
+                       envelope, workspace, tout, geometry.head_dim, nullptr);
     cuda_synchronize();
 
     const std::string label = case_label("gqa_attention", geometry, dtype, test_case);
@@ -625,7 +649,7 @@ int run_a3_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
-    const std::size_t q_elements = static_cast<std::size_t>(kHeadDim) *
+    const std::size_t q_elements = static_cast<std::size_t>(geometry.head_dim) *
                                    static_cast<std::size_t>(geometry.q_heads) *
                                    static_cast<std::size_t>(test_case.tokens);
     std::vector<float> q = make_bf16_values(q_elements, test_case.seed, -0.25f, 0.25f);
@@ -635,7 +659,8 @@ int run_a3_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     }
 
     const HostCache cache_host = make_cache(geometry, dtype, max_context, test_case.seed + 10u);
-    const std::vector<double> reference = ideal_attention(q, cache_host, positions);
+    const std::vector<double> reference =
+        ideal_attention(q, cache_host, positions, test_case.window);
     DeviceCache cache(cache_host);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -647,18 +672,20 @@ int run_a3_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     std::vector<std::uint16_t> output_canary(q_bits.size(), kOutputCanary);
     dout.copy_from_host(output_canary.data(), output_canary.size() * sizeof(std::uint16_t));
 
-    Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
+    Tensor tq(dq.data(), DType::BF16, {geometry.head_dim, geometry.q_heads, test_case.tokens});
     Tensor tp(dp.data(), DType::I32, {test_case.tokens});
-    Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
+    Tensor tout(dout.data(), DType::BF16, {geometry.head_dim, geometry.q_heads, test_case.tokens});
     const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
                                              test_case.envelope_max};
-const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
-         geometry.q_heads, kHeadDim, dtype, envelope, test_case.tokens, test_case.tokens);
+    std::cerr << ">> a3 " << geometry.name << " T=" << test_case.tokens
+              << " base=" << test_case.base << " w=" << test_case.window << std::flush;
+    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+        geometry.q_heads, geometry.head_dim, dtype, envelope, test_case.tokens, test_case.tokens);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
-    ops::gqa_attention_cached(tq, tp, kAttentionScale, cache.view(), envelope, workspace, tout,
-                               kHeadDim, nullptr);
+    ops::gqa_attention_cached(tq, tp, geometry.attention_scale(), test_case.window, cache.view(),
+                              envelope, workspace, tout, geometry.head_dim, nullptr);
     cuda_synchronize();
 
     const std::string label = case_label("gqa_attention_cached", geometry, dtype, test_case);
@@ -685,17 +712,24 @@ int run_geometry(const Geometry& geometry) {
         failures += run_append_case(geometry, dtype, 100u + geometry.q_heads);
 
         const AttentionCase a1_cases[] = {
-            {1, 0, 1, 201u},    {6, 17, 23, 202u}, {7, 17, 512, 203u},
-            {17, 31, 48, 204u}, {65, 0, 65, 205u},
+            {1, 0, 1, 0, 201u},    {6, 17, 23, 0, 202u}, {7, 17, 512, 0, 203u},
+            {17, 31, 48, 0, 204u}, {65, 0, 65, 0, 205u},
+            // Sliding-window masking: window > 0 must equal plain causal restricted to
+            // the last `window` keys (window below the visible history, above it, and
+            // spanning the small-T and prompt routes).
+            {6, 100, 106, 64, 206u}, {10, 100, 110, 64, 207u}, {17, 100, 117, 64, 208u},
+            {6, 17, 23, 64, 209u},
         };
         for (const AttentionCase& test_case : a1_cases) {
             failures += run_a1_case(geometry, dtype, test_case);
         }
 
         const AttentionCase a3_cases[] = {
-            {1, 31, 32, 301u},
-            {7, 17, 512, 302u},
-            {17, 31, 48, 303u},
+            {1, 31, 32, 0, 301u},
+            {7, 17, 512, 0, 302u},
+            {17, 31, 48, 0, 303u},
+            {1, 100, 101, 64, 304u},
+            {6, 100, 106, 64, 305u},
         };
         for (const AttentionCase& test_case : a3_cases) {
             failures += run_a3_case(geometry, dtype, test_case);
@@ -704,10 +738,10 @@ int run_geometry(const Geometry& geometry) {
         if (geometry.q_heads == 16) {
             // Loose execution envelopes straddle the two registered host-resource frontiers.
             // Device positions, not these bounds, continue to define the oracle result.
-            failures += run_a1_case(geometry, dtype, {7, 17, 513, 401u});
-            failures += run_a3_case(geometry, dtype, {7, 17, 513, 402u});
-            failures += run_a3_case(geometry, dtype, {16, 17, 1024, 403u});
-            failures += run_a3_case(geometry, dtype, {16, 17, 1025, 404u});
+            failures += run_a1_case(geometry, dtype, {7, 17, 513, 0, 401u});
+            failures += run_a3_case(geometry, dtype, {7, 17, 513, 0, 402u});
+            failures += run_a3_case(geometry, dtype, {16, 17, 1024, 0, 403u});
+            failures += run_a3_case(geometry, dtype, {16, 17, 1025, 0, 404u});
         }
     }
     return failures;
@@ -716,22 +750,26 @@ int run_geometry(const Geometry& geometry) {
 int verify_workspace_capacity_contract() {
     int failures = 0;
     for (const DType dtype : {DType::BF16, DType::I8}) {
-        constexpr ops::GqaExecutionEnvelope envelope{1, 1025};
-        const std::size_t interval =
-            ops::gqa_attention_workspace_capacity_bytes(16, dtype, envelope, 1, 17);
-        std::size_t witness = 0;
-        for (std::int32_t tokens = 1; tokens <= 17; ++tokens) {
-            witness = std::max(witness, ops::gqa_attention_workspace_capacity_bytes(
-                                            16, dtype, envelope, tokens, tokens));
-        }
-        if (interval != witness) {
-            std::cerr << "gqa_attention interval capacity has no exact route witness\n";
-            ++failures;
+        for (const auto [q_heads, head_dim] :
+             {std::pair{16, 256}, std::pair{48, 128}, std::pair{64, 128}}) {
+            constexpr ops::GqaExecutionEnvelope envelope{1, 1025};
+            const std::size_t interval = ops::gqa_attention_workspace_capacity_bytes(
+                q_heads, head_dim, dtype, envelope, 1, 17);
+            std::size_t witness = 0;
+            for (std::int32_t tokens = 1; tokens <= 17; ++tokens) {
+                witness = std::max(witness, ops::gqa_attention_workspace_capacity_bytes(
+                                                q_heads, head_dim, dtype, envelope, tokens,
+                                                tokens));
+            }
+            if (interval != witness) {
+                std::cerr << "gqa_attention interval capacity has no exact route witness\n";
+                ++failures;
+            }
         }
     }
     try {
         (void)ops::gqa_attention_workspace_capacity_bytes(
-            16, DType::BF16, {1, std::numeric_limits<std::uint32_t>::max()}, 1, 1);
+            16, 256, DType::BF16, {1, std::numeric_limits<std::uint32_t>::max()}, 1, 1);
         std::cerr << "gqa_attention accepted an envelope outside the launcher domain\n";
         ++failures;
     } catch (const std::invalid_argument&) {}

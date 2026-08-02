@@ -41,23 +41,6 @@ constexpr double kVideoFps             = 2.0;
 constexpr int kVideoMinFrames          = 4;
 constexpr int kVideoMaxFrames          = 768;
 
-constexpr std::array<std::pair<std::string_view, TokenId>, 4> kVisionSpecialTokens = {{
-    {"<|vision_start|>", 248053},
-    {"<|vision_end|>", 248054},
-    {"<|image_pad|>", 248056},
-    {"<|video_pad|>", 248057},
-}};
-
-constexpr std::array<std::pair<std::string_view, TokenId>, 7> kConfigOnlyTokens = {{
-    {"<|audio_start|>", 248070},
-    {"<|audio_end|>", 248071},
-    {"<tts_pad>", 248072},
-    {"<tts_text_bos>", 248073},
-    {"<tts_text_eod>", 248074},
-    {"<tts_text_bos_single>", 248075},
-    {"<|audio_pad|>", 248076},
-}};
-
 Json parse_resource_json(std::string_view bytes, std::string_view name) {
     try {
         Json result = Json::parse(bytes);
@@ -140,7 +123,9 @@ void validate_pixel_pipeline(const Json& config, std::string_view resource) {
     }
 }
 
-fi::ProcessorOptions processor_options(const FrontendResources& resources) {
+fi::ProcessorOptions processor_options(const FrontendResources& resources,
+                                       const FrontendProfile& profile,
+                                       bool vision_enabled) {
     const Json image =
         parse_resource_json(resources.preprocessor_config_json, "preprocessor_config.json");
     const Json video = parse_resource_json(resources.video_preprocessor_config_json,
@@ -175,22 +160,27 @@ fi::ProcessorOptions processor_options(const FrontendResources& resources) {
         throw std::invalid_argument(
             "video_preprocessor_config.json does not match registered sampling defaults");
     }
+    options.vision_enabled = vision_enabled;
+    options.render_prefix  = profile.bos_token;
 
     return options;
 }
 
-void validate_tokenizer_config(const FrontendResources& resources) {
+void validate_tokenizer_config(const FrontendResources& resources,
+                               const FrontendProfile& profile) {
     const Json tokenizer_config =
         parse_resource_json(resources.tokenizer_config_json, "tokenizer_config.json");
-    if (tokenizer_config.value("add_bos_token", true) ||
-        tokenizer_config.value("add_prefix_space", true)) {
+    if (tokenizer_config.value("add_bos_token", profile.bos_absent_default) !=
+            profile.require_bos ||
+        tokenizer_config.value("add_prefix_space", profile.prefix_space_absent_default) !=
+            profile.require_prefix_space) {
         throw std::invalid_argument(
-            "tokenizer_config.json does not match Qwen3.6 tokenizer prefix semantics");
+            "tokenizer_config.json does not match the registered tokenizer prefix semantics");
     }
     if (!tokenizer_config.contains("pad_token") || !tokenizer_config.at("pad_token").is_string() ||
-        tokenizer_config.at("pad_token").get<std::string>() != "<|endoftext|>") {
-        throw std::invalid_argument(
-            "tokenizer_config.json does not use the official <|endoftext|> pad token");
+        tokenizer_config.at("pad_token").get<std::string>() != profile.pad_token) {
+        throw std::invalid_argument("tokenizer_config.json does not use the registered " +
+                                    profile.pad_token + " pad token");
     }
 }
 
@@ -202,19 +192,21 @@ void validate_tokenizer_config(const FrontendResources& resources) {
     throw std::logic_error("unknown Qwen3.6 processor error kind");
 }
 
-void validate_registered_tokenizer(const fi::Tokenizer& tokenizer) {
-    if (!tokenizer.has_exact_token_domain(kTokenDomain)) {
+void validate_registered_tokenizer(const fi::Tokenizer& tokenizer,
+                                   const FrontendProfile& profile) {
+    if (!tokenizer.has_exact_token_domain(profile.token_domain)) {
         throw std::invalid_argument(
-            "artifact tokenizer does not expose the registered 248077-token domain");
+            "artifact tokenizer does not expose the registered " +
+            std::to_string(profile.token_domain) + "-token domain");
     }
-    for (const auto& [text, expected] : kVisionSpecialTokens) {
+    for (const auto& [text, expected] : profile.vision_special_tokens) {
         const std::vector<int> encoded = tokenizer.encode(text);
         if (encoded.size() != 1 || encoded.front() != expected) {
             throw std::invalid_argument("artifact tokenizer does not match registered Vision token "
                                         "IDs");
         }
     }
-    for (const auto& [text, expected] : kConfigOnlyTokens) {
+    for (const auto& [text, expected] : profile.config_only_tokens) {
         const std::vector<int> encoded = tokenizer.encode(text);
         if (encoded.size() != 1 || encoded.front() != expected ||
             !tokenizer.is_special_token(expected)) {
@@ -590,14 +582,17 @@ DecoderState terminal_state(DecoderState state) {
 
 class Frontend::Impl {
 public:
-    Impl(const FrontendResources& resources, bool registered_checkpoint, bool vision_enabled_)
+    Impl(const FrontendResources& resources, bool registered_checkpoint, bool vision_enabled_,
+         FrontendProfile profile)
         : tokenizer(std::make_shared<const fi::Tokenizer>(
               fi::TokenizerResources{.tokenizer_json         = resources.tokenizer_json,
                                      .tokenizer_config_json  = resources.tokenizer_config_json,
                                      .generation_config_json = resources.generation_config_json})),
-          processor(processor_options(resources)), vision_enabled(vision_enabled_) {
-        validate_tokenizer_config(resources);
-        if (registered_checkpoint) { validate_registered_tokenizer(*tokenizer); }
+          processor(processor_options(resources, profile, vision_enabled_)),
+          vision_enabled(vision_enabled_),
+          render_prefix(std::move(profile.bos_token)) {
+        validate_tokenizer_config(resources, profile);
+        if (registered_checkpoint) { validate_registered_tokenizer(*tokenizer, profile); }
         for (const int token : tokenizer->default_stop_token_ids()) {
             if (!tokenizer->is_valid_token(token)) {
                 throw std::invalid_argument(
@@ -611,6 +606,7 @@ public:
     fi::ProcessorOptions processor;
     StopPolicy defaults;
     bool vision_enabled = true;
+    std::string render_prefix;
 };
 
 class OutputSession::Impl {
@@ -773,13 +769,17 @@ Frontend::Frontend(Frontend&&) noexcept            = default;
 Frontend& Frontend::operator=(Frontend&&) noexcept = default;
 Frontend::~Frontend()                              = default;
 
-Frontend make_frontend(const FrontendResources& resources, bool vision_enabled) {
-    return Frontend(std::make_shared<const Frontend::Impl>(resources, true, vision_enabled));
+Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
+                       FrontendProfile profile) {
+    return Frontend(std::make_shared<const Frontend::Impl>(resources, true, vision_enabled,
+                                                           std::move(profile)));
 }
 
 Frontend FrontendTestAccess::create_component(const FrontendResources& resources,
-                                              bool vision_enabled) {
-    return Frontend(std::make_shared<const Frontend::Impl>(resources, false, vision_enabled));
+                                              bool vision_enabled, FrontendProfile profile,
+                                              bool registered_checkpoint) {
+    return Frontend(std::make_shared<const Frontend::Impl>(resources, registered_checkpoint,
+                                                           vision_enabled, std::move(profile)));
 }
 
 const PreparedPromptData& PreparedPromptAccess::view(const PreparedPrompt& prompt) {
@@ -832,7 +832,7 @@ PreparedPrompt Frontend::prepare(PromptInput input) const {
         result.prepare.patch_bytes     = processed.stats.patch_bytes;
     } else {
         const std::string rendered = fi::render_chat(messages, render_options(options));
-        result.token_ids           = impl_->tokenizer->encode(rendered);
+        result.token_ids = impl_->tokenizer->encode(impl_->render_prefix + rendered);
         assign_text_positions(result);
     }
     (void)checked_token_count(result.token_ids.size());
@@ -854,8 +854,10 @@ std::uint32_t Frontend::count_tokens(PromptInput input) const {
         throw std::invalid_argument("Vision is disabled for this Engine");
     }
     if (!has_media) {
-        return checked_token_count(
-            impl_->tokenizer->encode(fi::render_chat(messages, render_options(options))).size());
+        return checked_token_count(impl_->tokenizer
+                                       ->encode(impl_->render_prefix +
+                                                fi::render_chat(messages, render_options(options)))
+                                       .size());
     }
 
     fi::ProcessorOptions processor_options = impl_->processor;

@@ -65,7 +65,8 @@ Package::construct_loaded_model(LoadPlan&& plan, artifact::MaterializedArtifact&
 Package::Frontend Package::make_frontend(const LoadedModel& model) {
     if (model.impl_ == nullptr) { throw std::invalid_argument("loaded model is empty"); }
     return qwen3_6::make_frontend(model.impl_->data.frontend,
-                                  model.impl_->data.runtime.features.vision);
+                                  model.impl_->data.runtime.features.vision,
+                                  qwen3_6::FrontendProfile{});
 }
 
 Package::SequencePlan Package::plan_sequence(DeviceContext& device, const EngineOptions& options,

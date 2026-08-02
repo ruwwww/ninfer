@@ -84,9 +84,10 @@ std::int32_t gqa_small_t_launch_capacity(GqaExecutionEnvelope envelope, std::int
 
 template <typename Geometry, int TokenTile, int WarpsPerCta, typename CacheInput>
 void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
-                            KVCacheLayerView cache, std::int32_t padded_context,
-                            std::int32_t max_context, std::int32_t splits, Tensor& partial_acc,
-                            Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
+                            std::int32_t window, KVCacheLayerView cache,
+                            std::int32_t padded_context, std::int32_t max_context,
+                            std::int32_t splits, Tensor& partial_acc, Tensor& partial_m,
+                            Tensor& partial_l, cudaStream_t stream) {
     constexpr int kBlock = 32 * WarpsPerCta;
     const int tokens     = q.ne[2];
     const dim3 grid(Geometry::KVHeads, splits, 1);
@@ -98,17 +99,18 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
             static_cast<__nv_bfloat16*>(cache_v.data), tokens, padded_context, max_context, scale,
-            static_cast<__nv_bfloat16*>(partial_acc.data), static_cast<float*>(partial_m.data),
-            static_cast<float*>(partial_l.data));
+            window, static_cast<__nv_bfloat16*>(partial_acc.data),
+            static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     CUDA_CHECK(cudaGetLastError());
 }
 
 template <typename Geometry, int TokenTile, typename CacheInput>
 void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
-                          KVCacheLayerView cache, std::int32_t padded_context,
-                          std::int32_t max_context, std::int32_t implementation_window,
-                          std::int32_t splits, Tensor& partial_acc, Tensor& partial_m,
-                          Tensor& partial_l, cudaStream_t stream) {
+                          std::int32_t window, KVCacheLayerView cache,
+                          std::int32_t padded_context, std::int32_t max_context,
+                          std::int32_t implementation_window, std::int32_t splits,
+                          Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
+                          cudaStream_t stream) {
     Tensor& cache_k       = cache.k;
     Tensor& cache_v       = cache.v;
     Tensor& cache_k_scale = cache.k_scale;
@@ -116,7 +118,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena>() {
         const dim3 grid(Geometry::KVHeads, splits, 1);
         constexpr std::size_t kDynamicBytes =
-            DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kGqaHeadDim) : 0u;
+            DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * Geometry::HeadDim) : 0u;
         if constexpr (DynamicArena) {
             static const cudaError_t attr = cudaFuncSetAttribute(
                 gqa_attention_decode_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
@@ -132,8 +134,8 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
                 static_cast<std::int8_t*>(cache_v.data), static_cast<__half*>(cache_k_scale.data),
                 static_cast<__half*>(cache_v_scale.data), padded_context, max_context, scale,
-                static_cast<__nv_bfloat16*>(partial_acc.data), static_cast<float*>(partial_m.data),
-                static_cast<float*>(partial_l.data));
+                window, static_cast<__nv_bfloat16*>(partial_acc.data),
+                static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
     if constexpr (TokenTile == 6) {
         // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
@@ -210,7 +212,7 @@ std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t hea
 
 template <typename Geometry, typename CacheInput>
 void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const Tensor& pos,
-                                      float scale, KVCacheLayerView cache,
+                                      float scale, std::int32_t window, KVCacheLayerView cache,
                                       GqaExecutionEnvelope envelope, Tensor& partial_acc,
                                       Tensor& partial_m, Tensor& partial_l, Tensor& out,
                                       cudaStream_t stream) {
@@ -224,13 +226,14 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
 #define NINFER_GQA_SMALL_T_DISPATCH(TOKENS, WARPS)                                                 \
     do {                                                                                           \
         if (cache.dtype == DType::I8) {                                                            \
-            launch_tc_partial_i8<Geometry, (TOKENS)>(q, input, pos, scale, cache, padded_context,  \
-                                                     max_context, implementation_window, splits,   \
-                                                     partial_acc, partial_m, partial_l, stream);   \
+            launch_tc_partial_i8<Geometry, (TOKENS)>(q, input, pos, scale, window, cache,          \
+                                                     padded_context, max_context,                  \
+                                                     implementation_window, splits, partial_acc,   \
+                                                     partial_m, partial_l, stream);                \
         } else {                                                                                   \
             launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS)>(                                   \
-                q, input, pos, scale, cache, padded_context, max_context, splits, partial_acc,     \
-                partial_m, partial_l, stream);                                                     \
+                q, input, pos, scale, window, cache, padded_context, max_context, splits,          \
+                partial_acc, partial_m, partial_l, stream);                                        \
         }                                                                                          \
     } while (0)
 
@@ -260,14 +263,14 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
 
     constexpr int kReduceBlock = 256;
     constexpr int kDChunk      = 64;
-    const dim3 reduce_grid(Geometry::QHeads, div_up(kGqaHeadDim, kDChunk), q.ne[2]);
+    const dim3 reduce_grid(Geometry::QHeads, div_up(Geometry::HeadDim, kDChunk), q.ne[2]);
     if (cache.dtype == DType::I8) {
         gqa_attention_small_t_reduce_output_kernel<Geometry, kDChunk, true>
             <<<reduce_grid, kReduceBlock, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(partial_acc.data),
                 static_cast<const float*>(partial_m.data),
                 static_cast<const float*>(partial_l.data),
-                static_cast<const std::int32_t*>(pos.data), q.ne[2], splits,
+                static_cast<const std::int32_t*>(pos.data), q.ne[2], splits, window,
                 static_cast<__nv_bfloat16*>(out.data));
     } else {
         gqa_attention_small_t_reduce_output_kernel<Geometry, kDChunk, false>
@@ -275,76 +278,83 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
                 static_cast<const __nv_bfloat16*>(partial_acc.data),
                 static_cast<const float*>(partial_m.data),
                 static_cast<const float*>(partial_l.data),
-                static_cast<const std::int32_t*>(pos.data), q.ne[2], splits,
+                static_cast<const std::int32_t*>(pos.data), q.ne[2], splits, window,
                 static_cast<__nv_bfloat16*>(out.data));
     }
     CUDA_CHECK(cudaGetLastError());
 }
 
 void gqa_attention_small_t_launch(const Tensor& q, const Tensor& k, const Tensor& v,
-                                   const Tensor& pos, float scale, KVCacheLayerView cache,
-                                   GqaExecutionEnvelope envelope, Tensor& partial_acc,
-                                   Tensor& partial_m, Tensor& partial_l, Tensor& out,
-                                   cudaStream_t stream) {
+                                  const Tensor& pos, float scale, std::int32_t window,
+                                  KVCacheLayerView cache, GqaExecutionEnvelope envelope,
+                                  Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
+                                  Tensor& out, cudaStream_t stream) {
     const GqaAppendInput input{static_cast<const __nv_bfloat16*>(k.data),
                                 static_cast<const __nv_bfloat16*>(v.data)};
     if (q.ne[1] == Gqa27Geometry::QHeads) {
-        gqa_attention_small_t_launch_for<Gqa27Geometry>(
-            q, input, pos, scale, cache, envelope, partial_acc, partial_m, partial_l, out, stream);
+        gqa_attention_small_t_launch_for<Gqa27Geometry>(q, input, pos, scale, window, cache,
+                                                        envelope, partial_acc, partial_m, partial_l,
+                                                        out, stream);
         return;
     }
     if (q.ne[1] == GqaLagunaFullGeometry::QHeads) {
         gqa_attention_small_t_launch_for<GqaLagunaFullGeometry>(
-            q, input, pos, scale, cache, envelope, partial_acc, partial_m, partial_l, out, stream);
+            q, input, pos, scale, window, cache, envelope, partial_acc, partial_m, partial_l, out,
+            stream);
         return;
     }
     if (q.ne[1] == GqaLagunaSwaGeometry::QHeads) {
         gqa_attention_small_t_launch_for<GqaLagunaSwaGeometry>(
-            q, input, pos, scale, cache, envelope, partial_acc, partial_m, partial_l, out, stream);
+            q, input, pos, scale, window, cache, envelope, partial_acc, partial_m, partial_l, out,
+            stream);
         return;
     }
-    gqa_attention_small_t_launch_for<Gqa35Geometry>(q, input, pos, scale, cache, envelope,
-                                                     partial_acc, partial_m, partial_l, out, stream);
+    gqa_attention_small_t_launch_for<Gqa35Geometry>(q, input, pos, scale, window, cache, envelope,
+                                                    partial_acc, partial_m, partial_l, out, stream);
 }
 
 void gqa_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, float scale,
-                                          const KVCacheLayerView& cache,
-                                          GqaExecutionEnvelope envelope, Tensor& partial_acc,
-                                          Tensor& partial_m, Tensor& partial_l, Tensor& out,
-                                          cudaStream_t stream) {
+                                         std::int32_t window, const KVCacheLayerView& cache,
+                                         GqaExecutionEnvelope envelope, Tensor& partial_acc,
+                                         Tensor& partial_m, Tensor& partial_l, Tensor& out,
+                                         cudaStream_t stream) {
     const GqaCachedInput input{};
     if (q.ne[1] == Gqa27Geometry::QHeads) {
-        gqa_attention_small_t_launch_for<Gqa27Geometry>(
-            q, input, pos, scale, cache, envelope, partial_acc, partial_m, partial_l, out, stream);
+        gqa_attention_small_t_launch_for<Gqa27Geometry>(q, input, pos, scale, window, cache,
+                                                        envelope, partial_acc, partial_m, partial_l,
+                                                        out, stream);
         return;
     }
     if (q.ne[1] == GqaLagunaFullGeometry::QHeads) {
         gqa_attention_small_t_launch_for<GqaLagunaFullGeometry>(
-            q, input, pos, scale, cache, envelope, partial_acc, partial_m, partial_l, out, stream);
+            q, input, pos, scale, window, cache, envelope, partial_acc, partial_m, partial_l, out,
+            stream);
         return;
     }
     if (q.ne[1] == GqaLagunaSwaGeometry::QHeads) {
         gqa_attention_small_t_launch_for<GqaLagunaSwaGeometry>(
-            q, input, pos, scale, cache, envelope, partial_acc, partial_m, partial_l, out, stream);
+            q, input, pos, scale, window, cache, envelope, partial_acc, partial_m, partial_l, out,
+            stream);
         return;
     }
-    gqa_attention_small_t_launch_for<Gqa35Geometry>(q, input, pos, scale, cache, envelope,
-                                                     partial_acc, partial_m, partial_l, out, stream);
+    gqa_attention_small_t_launch_for<Gqa35Geometry>(q, input, pos, scale, window, cache, envelope,
+                                                    partial_acc, partial_m, partial_l, out, stream);
 }
 
 void gqa_attention_launch(const Tensor& q, const Tensor& k, const Tensor& v,
-                          const Tensor& positions, float scale, KVCacheLayerView cache,
-                          GqaExecutionEnvelope envelope, Tensor* partial_acc, Tensor* partial_m,
-                          Tensor* partial_l, Tensor& out, cudaStream_t stream) {
+                          const Tensor& positions, float scale, std::int32_t window,
+                          KVCacheLayerView cache, GqaExecutionEnvelope envelope,
+                          Tensor* partial_acc, Tensor* partial_m, Tensor* partial_l, Tensor& out,
+                          cudaStream_t stream) {
     if (gqa_attention_uses_small_t(q.ne[2])) {
         if (partial_acc == nullptr || partial_m == nullptr || partial_l == nullptr) {
             throw std::invalid_argument("gqa_attention: small-T route requires workspace");
         }
-        gqa_attention_small_t_launch(q, k, v, positions, scale, cache, envelope, *partial_acc,
-                                     *partial_m, *partial_l, out, stream);
+        gqa_attention_small_t_launch(q, k, v, positions, scale, window, cache, envelope,
+                                     *partial_acc, *partial_m, *partial_l, out, stream);
         return;
     }
-    gqa_attention_prompt_launch(q, k, v, positions, scale, cache, out, stream);
+    gqa_attention_prompt_launch(q, k, v, positions, scale, window, cache, out, stream);
 }
 
 } // namespace ninfer::ops::detail

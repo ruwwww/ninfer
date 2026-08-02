@@ -16,8 +16,11 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <variant>
+#include <vector>
 
 namespace ninfer::targets::laguna_xs_2_1::detail {
 
@@ -36,7 +39,7 @@ struct AttentionProjectionPayload {
     Weight v_proj;
     Tensor q_norm;
     Tensor k_norm;
-    Tensor g_proj;
+    Weight g_proj;
     Weight o_proj;
 };
 
@@ -44,7 +47,7 @@ struct GdnProjectionPayload {};
 
 struct SparseMoePayload {
     ops::SparseMoeWeights op;
-    Weight e_score_correction_bias;  // [num_experts] load balancing bias
+    Tensor e_score_correction_bias;  // [num_experts] load balancing bias
     float moe_routed_scaling_factor = 2.5f;
 };
 
@@ -67,16 +70,19 @@ struct LayerBindingPlan {
     int q_heads = 0;
     int q_rows = 0;
 
+    artifact::ObjectHandle input_norm;
     WeightPlan q_proj;
     WeightPlan k_proj;
     WeightPlan v_proj;
     artifact::ObjectHandle q_norm;
     artifact::ObjectHandle k_norm;
-    artifact::ObjectHandle g_proj;
+    WeightPlan g_proj;
     WeightPlan o_proj;
+    artifact::ObjectHandle post_attention_norm;
 
     struct {
         WeightPlan router_gate;
+        artifact::ObjectHandle router_bias;
         WeightPlan routed_gate_up;
         WeightPlan routed_down;
         WeightPlan shared_gate_up;
@@ -100,17 +106,50 @@ struct BindingPlan {
 };
 
 // ---- Loaded model data ----
+// Restructured to match shared runtime expectations.
+// Laguna has 10 global/full-attention layers (indices 0,4,8,...,36) and no GDN layers.
 
 struct LoadedModelData {
+    // Nested type aliases required by shared runtime instance.h
+    struct FullLayer {};
+    struct GdnLayer {};
+    struct MtpLayer {};
+    struct DFlash {};
+
     qwen3_6::FrontendResources frontend;
     qwen3_6::StartupFeatures features;
     Weight token_embedding;
-    struct {
-        AttentionProjectionPayload attn;
-        PostMixerPayload mixer;
-    } layers[40];
+
+    // Global/full-attention layers: 10 layers at indices 0,4,8,...,36
+    struct FullLayerData {
+        Tensor input_norm;
+        AttentionProjectionPayload projection;
+        Weight output;
+        Tensor query_norm;
+        Tensor key_norm;
+        Tensor post_attention_norm;
+        PostMixerPayload post_mixer;
+    };
+    FullLayerData full_layers[10];
+    std::array<FullLayerData, 30> swa_layers;
+    std::vector<FullLayerData> gdn_layers;
+
     Tensor final_norm;
     Weight output_head;
+
+    // Optional features (empty for Laguna)
+    struct OptimizedProposalHead {
+        const std::int32_t* token_ids = nullptr;
+        struct { std::int32_t n = 0; } head;
+    };
+    struct MtpWeightsData {};
+
+    const OptimizedProposalHead* optimized_proposal = nullptr;
+    const MtpWeightsData* mtp = nullptr;
+    const std::byte* dflash = nullptr;
+
+    // Weight arena pointer (required by shared runtime code)
+    void* weights_arena = nullptr;
 };
 
 // ---- Runtime model view alias ----

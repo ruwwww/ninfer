@@ -91,7 +91,7 @@ def _build_text_core_specs() -> tuple[TensorSpec, ...]:
                 tensor_spec(prefix + "attention/v_proj", (kv_rows, HIDDEN_SIZE), W8),
                 tensor_spec(prefix + "attention/q_norm", (HEAD_DIM,), BF16),
                 tensor_spec(prefix + "attention/k_norm", (HEAD_DIM,), BF16),
-                tensor_spec(prefix + "attention/g_proj", (q_heads,), BF16),
+                tensor_spec(prefix + "attention/g_proj", (q_heads, HIDDEN_SIZE), W8),
                 tensor_spec(prefix + "attention/o_proj", (HIDDEN_SIZE, q_rows), W8),
             )
         )
@@ -114,6 +114,7 @@ def _build_text_core_specs() -> tuple[TensorSpec, ...]:
             specs.extend(
                 (
                     tensor_spec(prefix + "moe/router_gate", (NUM_EXPERTS, HIDDEN_SIZE), BF16),
+                    tensor_spec(prefix + "moe/router_bias", (NUM_EXPERTS,), BF16),
                     tensor_spec(prefix + "moe/routed_gate_up", (NUM_EXPERTS * 2 * MOE_INTERMEDIATE, HIDDEN_SIZE), Q4),
                     tensor_spec(
                         prefix + "moe/routed_down",

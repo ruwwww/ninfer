@@ -5,7 +5,6 @@
 #include "artifact/reader.h"
 #include "targets/laguna_xs_2_1/impl/load/bindings.h"
 #include "targets/laguna_xs_2_1/impl/variant.h"
-#include "targets/laguna_xs_2_1/impl/runtime/layouts.h"
 
 #include <stdexcept>
 #include <utility>
@@ -28,6 +27,29 @@ LoadedModel::~LoadedModel() = default;
 } // namespace ninfer::targets::laguna_xs_2_1::detail
 
 namespace ninfer::targets::laguna_xs_2_1 {
+namespace {
+
+qwen3_6::FrontendProfile laguna_frontend_profile() {
+    // Registered laguna special tokens pinned from the checkpoint tokenizer:
+    // "〈|EOS|〉" is both bos and eos (template head + stop id 2), "〈|PAD|〉" is
+    // the registered pad token id 9.
+    constexpr std::array<std::pair<std::string_view, ninfer::TokenId>, 2>
+        kLagunaSpecialTokens = {{
+            {"\xE3\x80\x88|EOS|\xE3\x80\x89", 2},
+            {"\xE3\x80\x88|PAD|\xE3\x80\x89", 9},
+        }};
+    qwen3_6::FrontendProfile profile;
+    profile.token_domain                = 100352;
+    profile.pad_token                   = "\xE3\x80\x88|PAD|\xE3\x80\x89";
+    profile.bos_absent_default          = false;
+    profile.prefix_space_absent_default = false;
+    profile.bos_token                   = "\xE3\x80\x88|EOS|\xE3\x80\x89";
+    profile.vision_special_tokens       = {};
+    profile.config_only_tokens          = kLagunaSpecialTokens;
+    return profile;
+}
+
+} // namespace
 
 Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentity& identity) {
     if (identity.model_id == model_id && identity.weights_id == "groupwise-int") {
@@ -57,12 +79,13 @@ Package::construct_loaded_model(LoadPlan&& plan, artifact::MaterializedArtifact&
 Package::Frontend Package::make_frontend(const LoadedModel& model) {
     if (model.impl_ == nullptr) { throw std::invalid_argument("loaded model is empty"); }
     return qwen3_6::make_frontend(model.impl_->data.frontend,
-                                   model.impl_->data.features.vision);
+                                   model.impl_->data.features.vision,
+                                   laguna_frontend_profile());
 }
 
-Package::SequencePlan Package::plan_sequence(DeviceContext& /*device*/, const EngineOptions& options,
+Package::SequencePlan Package::plan_sequence(DeviceContext& device, const EngineOptions& options,
                                                 WeightsProfile weights_profile) {
-    return ::ninfer::targets::laguna_xs_2_1::plan_sequence(options, weights_profile);
+    return qwen3_6::plan_sequence<detail::Variant>(device, options, weights_profile);
 }
 
 std::unique_ptr<Package::Program>

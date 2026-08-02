@@ -130,9 +130,9 @@ def validate_config(config: Mapping[str, object]) -> dict[str, object]:
 def preflight_inventory() -> None:
     """Establish the one complete target inventory and recipe pairing."""
 
-    if len(inventory.OBJECT_SPECS) != 578:
+    if len(inventory.OBJECT_SPECS) != 606:
         raise ValueError(
-            f"registered inventory has {len(inventory.OBJECT_SPECS)} objects, expected 578"
+            f"registered inventory has {len(inventory.OBJECT_SPECS)} objects, expected 606"
         )
     recipe.validate_recipe_coverage()
 

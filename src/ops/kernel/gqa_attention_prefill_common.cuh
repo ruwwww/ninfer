@@ -11,31 +11,36 @@
 
 #include <cuda_bf16.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace ninfer::ops {
 
-inline constexpr int kGqaPrefillHeadDim = 256;
+inline constexpr int kGqaPrefillBr      = 64;
+inline constexpr int kGqaPrefillBc      = 64;
+inline constexpr int kGqaPrefillThreads = 128;
 
-inline constexpr int kGqaPrefillBr        = 64;
-inline constexpr int kGqaPrefillBc        = 64;
-inline constexpr int kGqaPrefillThreads   = 128;
-inline constexpr int kGqaPrefillSmemBytes = (kGqaPrefillBr + 2 * kGqaPrefillBc) *
-                                            kGqaPrefillHeadDim *
-                                            static_cast<int>(sizeof(__nv_bfloat16));
+template <typename Geometry>
+constexpr std::size_t gqa_prefill_smem_bytes() {
+    return (kGqaPrefillBr + 2 * kGqaPrefillBc) * Geometry::HeadDim *
+           static_cast<std::size_t>(sizeof(__nv_bfloat16));
+}
 
+template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_prefill_cache_index(int kv_head, int d, int position,
                                                                 int padded_context) {
-    return static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kGqaPrefillHeadDim) *
-                                              (static_cast<std::int64_t>(position) +
-                                               static_cast<std::int64_t>(padded_context) * kv_head);
+    return static_cast<std::int64_t>(d) +
+           static_cast<std::int64_t>(Geometry::HeadDim) *
+               (static_cast<std::int64_t>(position) +
+                static_cast<std::int64_t>(padded_context) * kv_head);
 }
 
 template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_prefill_q_index(int q_head, int d, int token) {
-    return static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kGqaPrefillHeadDim) *
-                                              (static_cast<std::int64_t>(q_head) +
-                                               static_cast<std::int64_t>(Geometry::QHeads) * token);
+    return static_cast<std::int64_t>(d) +
+           static_cast<std::int64_t>(Geometry::HeadDim) *
+               (static_cast<std::int64_t>(q_head) +
+                static_cast<std::int64_t>(Geometry::QHeads) * token);
 }
 
 // XOR-swizzled b16 element address. INT8 operands use the same layout by packing

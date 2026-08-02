@@ -17,7 +17,7 @@ namespace {
 constexpr std::int32_t kHeadDim                      = 256;
 constexpr std::int32_t kLagunaHeadDim                = 128;
 constexpr float kExpectedScale                       = 0.0625f;
-constexpr float kLagunaExpectedScale                 = 0.07905694f;  // 1/sqrt(128)
+constexpr float kLagunaExpectedScale                 = 0.08838835f;  // 1/sqrt(128)
 constexpr std::int32_t kSmallTChunkTokens            = 6;
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
@@ -175,7 +175,7 @@ SmallTWorkspace allocate_small_t_workspace(Allocator& workspace, std::int32_t q_
 template <typename Launch>
 void for_each_small_t_chunk(const Tensor& q, const Tensor& positions, WorkspaceArena& workspace,
                             DType cache_dtype, GqaExecutionEnvelope envelope, Tensor& out,
-                            std::int32_t head_dim, Launch&& launch) {
+                            std::int32_t head_dim, std::int32_t window, Launch&& launch) {
     const int expected_dim = (head_dim == 128) ? kLagunaHeadDim : kHeadDim;
     for (std::int32_t begin = 0; begin < q.ne[2]; begin += kSmallTChunkTokens) {
         const std::int32_t count = std::min(kSmallTChunkTokens, q.ne[2] - begin);
@@ -192,32 +192,33 @@ void for_each_small_t_chunk(const Tensor& q, const Tensor& positions, WorkspaceA
 }
 
 void launch_chunked_small_t(const Tensor& q, const Tensor& k, const Tensor& v,
-                            const Tensor& positions, float scale, KVCacheLayerView cache,
-                            GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& out,
-                            std::int32_t head_dim, cudaStream_t stream) {
+                            const Tensor& positions, float scale, std::int32_t window,
+                            KVCacheLayerView cache, GqaExecutionEnvelope envelope,
+                            WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
+                            cudaStream_t stream) {
     for_each_small_t_chunk(
-        q, positions, workspace, cache.dtype, envelope, out, head_dim,
+        q, positions, workspace, cache.dtype, envelope, out, head_dim, window,
         [&](std::int32_t begin, std::int32_t count, const Tensor& q_chunk,
             const Tensor& position_chunk, SmallTWorkspace& partial, Tensor& out_chunk) {
             Tensor k_chunk = k.slice(2, begin, count);
             Tensor v_chunk = v.slice(2, begin, count);
             detail::gqa_attention_small_t_launch(q_chunk, k_chunk, v_chunk, position_chunk, scale,
-                                                  cache, envelope, partial.acc, partial.m, partial.l,
-                                                  out_chunk, stream);
+                                                  window, cache, envelope, partial.acc, partial.m,
+                                                  partial.l, out_chunk, stream);
         });
 }
 
 void launch_cached_chunked_small_t(const Tensor& q, const Tensor& positions, float scale,
-                                    const KVCacheLayerView& cache, GqaExecutionEnvelope envelope,
-                                    WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
-                                    cudaStream_t stream) {
+                                   std::int32_t window, const KVCacheLayerView& cache,
+                                   GqaExecutionEnvelope envelope, WorkspaceArena& workspace,
+                                   Tensor& out, std::int32_t head_dim, cudaStream_t stream) {
     for_each_small_t_chunk(
-        q, positions, workspace, cache.dtype, envelope, out, head_dim,
+        q, positions, workspace, cache.dtype, envelope, out, head_dim, window,
         [&](std::int32_t, std::int32_t, const Tensor& q_chunk, const Tensor& position_chunk,
             SmallTWorkspace& partial, Tensor& out_chunk) {
-            detail::gqa_attention_cached_small_t_launch(q_chunk, position_chunk, scale, cache,
-                                                         envelope, partial.acc, partial.m, partial.l,
-                                                         out_chunk, stream);
+            detail::gqa_attention_cached_small_t_launch(q_chunk, position_chunk, scale, window,
+                                                         cache, envelope, partial.acc, partial.m,
+                                                         partial.l, out_chunk, stream);
         });
 }
 
@@ -305,11 +306,12 @@ std::size_t gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, std::in
 }
 
 void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
-                   float scale, KVCacheLayerView cache, GqaExecutionEnvelope envelope,
-                   WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
-                   cudaStream_t stream) {
+                   float scale, std::int32_t window, KVCacheLayerView cache,
+                   GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& out,
+                   std::int32_t head_dim, cudaStream_t stream) {
     constexpr const char* op = "gqa_attention";
     const int expected_dim = (head_dim == 128) ? kLagunaHeadDim : kHeadDim;
+    if (window < 0) { throw std::invalid_argument("gqa_attention: window must be non-negative"); }
     validate_attention_tensors(q, positions, out, cache, envelope, scale, head_dim, op);
     if (k.dtype != DType::BF16 || v.dtype != DType::BF16) {
         throw std::invalid_argument("gqa_attention: k/v must be BF16");
@@ -324,7 +326,7 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
     auto scope = workspace.scope();
     if (detail::gqa_attention_resolve_route(q.ne[1], expected_dim, tokens, envelope) ==
         detail::GqaAttentionRoute::ChunkedSmallT) {
-        launch_chunked_small_t(q, k, v, positions, scale, cache, envelope, workspace, out,
+        launch_chunked_small_t(q, k, v, positions, scale, window, cache, envelope, workspace, out,
                                static_cast<std::int32_t>(head_dim), stream);
         return;
     }
@@ -333,12 +335,12 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
             detail::gqa_attention_split_capacity(q.ne[1], head_dim, cache.dtype, envelope);
         SmallTWorkspace partial = allocate_small_t_workspace(workspace, q.ne[1], expected_dim,
                                                              tokens, splits);
-        detail::gqa_attention_launch(q, k, v, positions, scale, cache, envelope, &partial.acc,
-                                      &partial.m, &partial.l, out, stream);
+        detail::gqa_attention_launch(q, k, v, positions, scale, window, cache, envelope,
+                                     &partial.acc, &partial.m, &partial.l, out, stream);
         return;
     }
-    detail::gqa_attention_launch(q, k, v, positions, scale, cache, envelope, nullptr, nullptr,
-                                  nullptr, out, stream);
+    detail::gqa_attention_launch(q, k, v, positions, scale, window, cache, envelope, nullptr,
+                                 nullptr, nullptr, out, stream);
 }
 
 void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
@@ -369,18 +371,21 @@ void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
 }
 
 void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
-                          const KVCacheLayerView& cache, GqaExecutionEnvelope envelope,
-                          WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
-                          cudaStream_t stream) {
+                          std::int32_t window, const KVCacheLayerView& cache,
+                          GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& out,
+                          std::int32_t head_dim, cudaStream_t stream) {
     constexpr const char* op = "gqa_attention_cached";
+    if (window < 0) {
+        throw std::invalid_argument("gqa_attention_cached: window must be non-negative");
+    }
     validate_attention_tensors(q, positions, out, cache, envelope, scale, head_dim, op);
 
     auto scope = workspace.scope();
     const int expected_dim = (head_dim == 128) ? kLagunaHeadDim : kHeadDim;
     if (detail::gqa_attention_resolve_route(q.ne[1], expected_dim, q.ne[2], envelope) ==
         detail::GqaAttentionRoute::ChunkedSmallT) {
-        launch_cached_chunked_small_t(q, positions, scale, cache, envelope, workspace, out,
-                                       static_cast<std::int32_t>(head_dim), stream);
+        launch_cached_chunked_small_t(q, positions, scale, window, cache, envelope, workspace, out,
+                                      static_cast<std::int32_t>(head_dim), stream);
         return;
     }
     if (detail::gqa_attention_uses_small_t(q.ne[2])) {
@@ -388,11 +393,11 @@ void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
             detail::gqa_attention_split_capacity(q.ne[1], head_dim, cache.dtype, envelope);
         SmallTWorkspace partial = allocate_small_t_workspace(workspace, q.ne[1], expected_dim,
                                                              q.ne[2], splits);
-        detail::gqa_attention_cached_small_t_launch(q, positions, scale, cache, envelope,
+        detail::gqa_attention_cached_small_t_launch(q, positions, scale, window, cache, envelope,
                                                      partial.acc, partial.m, partial.l, out, stream);
         return;
     }
-    detail::gqa_attention_prompt_attention_launch(q, positions, scale, cache, out, stream);
+    detail::gqa_attention_prompt_attention_launch(q, positions, scale, window, cache, out, stream);
 }
 
 } // namespace ninfer::ops

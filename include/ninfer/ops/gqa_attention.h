@@ -64,6 +64,10 @@ struct GqaExecutionEnvelope {
  *   probability = softmax_j(score)
  *   ideal[:,h,t] = sum_j probability[j] * V_cache[:,j,kvh].
  *
+ * window selects the visible-key range: window == 0 is full causal visibility over [0, p];
+ * window > 0 restricts each query to the sliding range [p - window + 1, p] (keys below the
+ * floor are masked out). The window only changes the mask; the cache write covers all T.
+ *
  * Supported geometries:
  *   - head_dim=256: [256,24|4,T] group 6 (Qwen3.6 27B), [256,16|2,T] group 8 (Qwen3.6 35B)
  *   - head_dim=128: [128,48|8,T] group 6 (Laguna XS 2.1 full), [128,64|8,T] group 8 (Laguna SWA)
@@ -72,9 +76,9 @@ struct GqaExecutionEnvelope {
  * Cache storage is BF16 or INT8-G64 under the shared numerical contract above.
  */
 void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
-                   float scale, KVCacheLayerView cache, GqaExecutionEnvelope envelope,
-                   WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
-                   cudaStream_t stream);
+                   float scale, std::int32_t window, KVCacheLayerView cache,
+                   GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& out,
+                   std::int32_t head_dim, cudaStream_t stream);
 
 /**
  * A2: perform only the cache-write part of A1. k/v are contiguous BF16, positions is
@@ -87,11 +91,12 @@ void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
 /**
  * A3: compute causal attention from an already populated cache without accepting new K/V or
  * mutating any cache plane. q/out are contiguous BF16, positions is contiguous sequential I32 [T].
+ * window follows the A1 contract: 0 = full causal over [0, p], > 0 = sliding [p - window + 1, p].
  * Supported head_dim: 256 (Qwen3.6) or 128 (Laguna XS 2.1).
  */
 void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
-                          const KVCacheLayerView& cache, GqaExecutionEnvelope envelope,
-                          WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
-                          cudaStream_t stream);
+                          std::int32_t window, const KVCacheLayerView& cache,
+                          GqaExecutionEnvelope envelope, WorkspaceArena& workspace, Tensor& out,
+                          std::int32_t head_dim, cudaStream_t stream);
 
 } // namespace ninfer::ops

@@ -77,11 +77,13 @@ add_library(ninfer_ops STATIC
   ops/launcher/residual_add.cu
   ops/launcher/rmsnorm.cu
   ops/launcher/rope.cu
+  ops/launcher/rope_yarn.cu
   ops/launcher/sampling.cu
   ops/launcher/scalar.cu
   ops/launcher/scatter.cu
   ops/launcher/sigmoid_gate_mul.cu
   ops/launcher/silu_and_mul.cu
+  ops/launcher/softplus_gate_mul.cu
   ops/launcher/vision_attention.cu
   ops/launcher/vision_pos_embed.cu
   # Gated DeltaNet Linear Attention core.
@@ -215,11 +217,13 @@ add_library(ninfer_ops STATIC
   ops/wrapper/residual_add.cpp
   ops/wrapper/rmsnorm.cpp
   ops/wrapper/rope.cpp
+  ops/wrapper/rope_yarn.cpp
   ops/wrapper/sampling.cpp
   ops/wrapper/scalar.cpp
   ops/wrapper/scatter.cpp
   ops/wrapper/sigmoid_mul.cpp
   ops/wrapper/silu_mul.cpp
+  ops/wrapper/softplus_mul.cpp
   ops/wrapper/sparse_moe.cpp
   ops/wrapper/vision_attention.cpp
   ops/wrapper/vision_pos_embed.cpp)

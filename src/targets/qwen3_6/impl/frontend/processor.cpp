@@ -621,11 +621,9 @@ Processor::Processor(const Tokenizer& tokenizer, ProcessorOptions options)
         options_.video_max_pixels < options_.video_min_pixels || !(options_.video_fps > 0.0) ||
         options_.video_min_frames <= 0 || options_.video_max_frames < options_.video_min_frames ||
         options_.max_video_source_frames < options_.video_max_frames ||
-        !(options_.max_video_duration_seconds > 0.0)) {
+         !(options_.max_video_duration_seconds > 0.0)) {
         throw std::invalid_argument("processor budgets must be positive");
     }
-    validate_special_token(tokenizer_, kImagePad, kImageToken);
-    validate_special_token(tokenizer_, kVideoPad, kVideoToken);
 }
 
 ProcessedInput Processor::process(const std::vector<ChatMessage>& messages,
@@ -635,7 +633,7 @@ ProcessedInput Processor::process(const std::vector<ChatMessage>& messages,
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
                              "media item count exceeds processor budget");
     }
-    std::string rendered = render_chat(messages, std::move(render_options));
+    std::string rendered = options_.render_prefix + render_chat(messages, std::move(render_options));
     const media::decode::Policy policy{
         .max_bytes                  = options_.max_media_bytes,
         .max_decoded_pixels         = options_.max_decoded_pixels,

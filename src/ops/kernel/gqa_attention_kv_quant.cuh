@@ -17,21 +17,22 @@
 
 namespace ninfer::ops {
 
-inline constexpr int kGqaKvQuantHeadDim = 256;
-inline constexpr int kGqaKvQuantGroup   = 64;
-inline constexpr int kGqaKvQuantGroups  = kGqaKvQuantHeadDim / kGqaKvQuantGroup;
+inline constexpr int kGqaKvQuantGroup = 64;
 
+template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_kv_quant_code_index(int kv_head, int d, int position,
                                                                 int padded_context) {
-    return static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kGqaKvQuantHeadDim) *
-                                              (static_cast<std::int64_t>(position) +
-                                               static_cast<std::int64_t>(padded_context) * kv_head);
+    return static_cast<std::int64_t>(d) +
+           static_cast<std::int64_t>(Geometry::HeadDim) *
+               (static_cast<std::int64_t>(position) +
+                static_cast<std::int64_t>(padded_context) * kv_head);
 }
 
+template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_kv_quant_scale_index(int kv_head, int group,
                                                                  int position, int padded_context) {
     return static_cast<std::int64_t>(group) +
-           static_cast<std::int64_t>(kGqaKvQuantGroups) *
+           static_cast<std::int64_t>(Geometry::HeadDim / kGqaKvQuantGroup) *
                (static_cast<std::int64_t>(position) +
                 static_cast<std::int64_t>(padded_context) * kv_head);
 }
@@ -39,7 +40,7 @@ __device__ __forceinline__ std::int64_t gqa_kv_quant_scale_index(int kv_head, in
 template <typename Geometry>
 __device__ __forceinline__ std::int64_t gqa_kv_quant_src_index(int kv_head, int d, int token) {
     return static_cast<std::int64_t>(d) +
-           static_cast<std::int64_t>(kGqaKvQuantHeadDim) *
+           static_cast<std::int64_t>(Geometry::HeadDim) *
                (static_cast<std::int64_t>(kv_head) +
                 static_cast<std::int64_t>(Geometry::KVHeads) * token);
 }
@@ -77,13 +78,16 @@ __device__ __forceinline__ int4 gqa_kv_dequant_i8x8_from(const std::int8_t* code
 // Dequantize 8 codes read directly from the (global) int8 cache row. Used by the
 // prefill staging path. The 8 codes are one coalesced 64-bit load, half the bytes
 // of the bf16 path.
+template <typename Geometry>
 __device__ __forceinline__ int4 gqa_kv_dequant_i8x8(const std::int8_t* __restrict__ cache,
                                                     const __half* __restrict__ scale, int kv_head,
                                                     int d, int position, int padded_context) {
-    const int group            = d >> 6; // d / 64
-    const std::int64_t scale_i = gqa_kv_quant_scale_index(kv_head, group, position, padded_context);
-    const float s              = __half2float(scale[scale_i]);
-    const std::int64_t code_off = gqa_kv_quant_code_index(kv_head, d, position, padded_context);
+    const int group = d >> 6; // d / 64
+    const std::int64_t scale_i =
+        gqa_kv_quant_scale_index<Geometry>(kv_head, group, position, padded_context);
+    const float s = __half2float(scale[scale_i]);
+    const std::int64_t code_off =
+        gqa_kv_quant_code_index<Geometry>(kv_head, d, position, padded_context);
     return gqa_kv_dequant_i8x8_from(&cache[code_off], s);
 }
 

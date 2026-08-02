@@ -7,6 +7,7 @@
 
 #include "core/arena.h"
 #include "core/tensor.h"
+#include <ninfer/targets/qwen3_6/diagnostics.h>
 
 #include <cmath>
 #include <cstdint>
@@ -20,23 +21,26 @@
 namespace ninfer::targets::laguna_xs_2_1::detail {
 
 struct GraphFrontierRange {
-    std::uint32_t begin = 0;
-    std::uint32_t end   = 0;
+    std::uint32_t min = 0;
+    std::uint32_t max = 0;
 };
 
-enum class TextPhase : std::uint8_t {
-    Prefill = 0,
-    Decode  = 1,
-};
+// Use the shared qwen3_6 TextPhase so the shared runtime code compiles correctly
+using TextPhase = qwen3_6::TextPhase;
 
 // ---- Variant struct ----
 
 struct Variant {
-    using ModelView                      = detail::LoadedModelData;
-    using WeightsProfile                 = detail::WeightsProfile;
-    using FullAttentionProjectionWeights = AttentionProjectionPayload;
-    using GdnProjectionWeights           = GdnProjectionPayload;
-    using PostMixerWeights               = std::variant<DenseMlpPayload, SparseMoePayload>;
+    using TextConfig                       = detail::TextConfig;
+    using VisionConfig                     = detail::VisionConfig;
+    using DFlashConfig                     = detail::DFlashConfig;
+    using ModelView                        = detail::LoadedModelData;
+    using WeightsProfile                   = detail::WeightsProfile;
+    using FullAttentionProjectionWeights   = AttentionProjectionPayload;
+    using GdnProjectionWeights             = GdnProjectionPayload;
+    using PostMixerWeights                 = std::variant<DenseMlpPayload, SparseMoePayload>;
+    using GraphFrontierRange               = detail::GraphFrontierRange;
+    using VisionWeights                    = void;
 
     // ---- Identity ----
     [[nodiscard]] static constexpr std::string_view model_id() noexcept {
@@ -63,7 +67,14 @@ struct Variant {
     static constexpr int swa_q_rows   = 8192;
     static constexpr int kv_rows      = 1024;
 
-    static constexpr float attention_scale = 1.0F / sqrtf(static_cast<float>(head_dim));
+    static constexpr float attention_scale = 0.08838834764831845F;
+
+    // Shared runtime constexpr requirements
+    static constexpr std::uint32_t draft_head_rows            = 0;
+    static constexpr std::uint32_t maximum_mtp_draft_tokens   = 0;
+    static constexpr std::uint32_t maximum_dflash_draft_tokens = 0;
+    static constexpr std::uint32_t prefill_chunk_alignment    = 128;
+    static constexpr float       gdn_scale                    = 0.0F;
 
     static constexpr bool supports_vision       = false;
     static constexpr bool supports_mtp          = false;
@@ -73,29 +84,64 @@ struct Variant {
 
     // ---- Static leaf function declarations ----
 
-    static void attention_projection(
+static void attention_projection(
         const Tensor& hidden,
         const FullAttentionProjectionWeights& weights,
-        int layer,
+        Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
         TextPhase phase,
-        Tensor& q_out, Tensor& k_out, Tensor& v_out,
         WorkspaceArena& workspace,
         cudaStream_t stream);
 
     static void post_mixer(
         const Tensor& hidden,
         const PostMixerWeights& weights,
-        int layer,
-        TextPhase phase,
         Tensor& residual,
+        TextPhase phase,
         WorkspaceArena& workspace,
         cudaStream_t stream);
 
     static void run_sparse_moe(const Tensor& hidden, const ops::SparseMoeWeights& weights,
-                                Tensor& residual, WorkspaceArena& workspace, cudaStream_t stream);
+        Tensor& residual, WorkspaceArena& workspace, cudaStream_t stream);
+
+    // Stub methods for unsupported features (MTP, GDN, attention output proj)
+    // These are never called at runtime because the corresponding feature flags are zero.
+    static void mtp_attention_projection(
+        const Tensor&, const void*, Tensor&, Tensor&, Tensor&, Tensor&,
+        WorkspaceArena&, cudaStream_t) {}
+    static void mtp_kv_projection(
+        const Tensor&, const void*, Tensor&, Tensor&,
+        WorkspaceArena&, cudaStream_t) {}
+    static void mtp_q_gate_projection(
+        const Tensor&, const void*, Tensor&, Tensor&,
+        WorkspaceArena&, cudaStream_t) {}
+    static void mtp_post_mixer(
+        const Tensor&, const void*, Tensor&,
+        WorkspaceArena&, cudaStream_t) {}
+    static void gdn_norm_control_projection(
+        const Tensor&, const Tensor&, float, const void*,
+        Tensor&, Tensor&, Tensor&, WorkspaceArena&, cudaStream_t) {}
+    static void gdn_input_projection(
+        const Tensor&, const void*, Tensor&, Tensor&, TextPhase,
+        WorkspaceArena&, cudaStream_t) {}
+    static void gdn_input_projection_snapshot(
+        const Tensor&, const void*, const Tensor&, Tensor&,
+        const Tensor&, Tensor&, Tensor&, Tensor&, TextPhase,
+        WorkspaceArena&, cudaStream_t) {}
+    static void gdn_output_projection(
+        const Tensor&, const Weight&, Tensor&, TextPhase,
+        WorkspaceArena&, cudaStream_t) {}
+    static void attention_output_projection(
+        const Tensor& attention, const Weight& weight, Tensor& residual, TextPhase phase,
+        WorkspaceArena& workspace, cudaStream_t stream);
 
     // ---- Graph capture frontier ranges ----
-    static std::vector<GraphFrontierRange> ordinary_graph_ranges() noexcept;
+    static std::vector<GraphFrontierRange> ordinary_graph_ranges(std::uint32_t capacity) noexcept;
+    static std::vector<GraphFrontierRange> mtp_graph_ranges(std::uint32_t, std::uint32_t) noexcept {
+        return {};
+    }
+    static std::vector<GraphFrontierRange> dflash_graph_ranges(std::uint32_t, std::uint32_t) noexcept {
+        return {};
+    }
 
     // ---- Workspace capacity functions ----
     [[nodiscard]] static std::size_t attention_projection_workspace_capacity_bytes(
@@ -103,6 +149,26 @@ struct Variant {
 
     [[nodiscard]] static std::size_t post_mixer_workspace_capacity_bytes(
         WeightsProfile profile, TextPhase phase, int first, int last);
+
+    // Stub capacity functions for unsupported features (GDN, MTP, DFlash, attn output proj)
+    [[nodiscard]] static std::size_t attention_output_projection_workspace_capacity_bytes(
+        WeightsProfile profile, TextPhase phase, int first, int last);
+    [[nodiscard]] static std::size_t gdn_norm_control_projection_workspace_capacity_bytes(
+        int first, int last);
+    [[nodiscard]] static std::size_t gdn_input_projection_workspace_capacity_bytes(
+        WeightsProfile profile, TextPhase phase, int first, int last);
+    [[nodiscard]] static std::size_t gdn_input_projection_snapshot_workspace_capacity_bytes(
+        WeightsProfile profile, TextPhase phase, int first, int last);
+    [[nodiscard]] static std::size_t gdn_output_projection_workspace_capacity_bytes(
+        WeightsProfile profile, TextPhase phase, int first, int last);
+    [[nodiscard]] static std::size_t mtp_attention_projection_workspace_capacity_bytes(
+        int first, int last);
+    [[nodiscard]] static std::size_t mtp_kv_projection_workspace_capacity_bytes(
+        int first, int last);
+    [[nodiscard]] static std::size_t mtp_q_gate_projection_workspace_capacity_bytes(
+        int first, int last);
+    [[nodiscard]] static std::size_t mtp_post_mixer_workspace_capacity_bytes(
+        int first, int last);
 
     // ---- Layer-type classification ----
     [[nodiscard]] static constexpr bool is_full_attention(int layer) noexcept {

@@ -3,15 +3,50 @@
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6 {
 
 inline constexpr std::size_t kTokenDomain = 248077;
+
+inline constexpr std::array<std::pair<std::string_view, TokenId>, 4> kVisionSpecialTokens = {{
+    {"<|vision_start|>", 248053},
+    {"<|vision_end|>", 248054},
+    {"<|image_pad|>", 248056},
+    {"<|video_pad|>", 248057},
+}};
+
+inline constexpr std::array<std::pair<std::string_view, TokenId>, 7> kConfigOnlyTokens = {{
+    {"<|audio_start|>", 248070},
+    {"<|audio_end|>", 248071},
+    {"<tts_pad>", 248072},
+    {"<tts_text_bos>", 248073},
+    {"<tts_text_eod>", 248074},
+    {"<tts_text_bos_single>", 248075},
+    {"<|audio_pad|>", 248076},
+}};
+
+struct FrontendProfile {
+    std::size_t token_domain          = kTokenDomain;
+    std::string pad_token             = "<|endoftext|>";
+    bool require_bos                  = false;
+    bool bos_absent_default           = true;
+    bool require_prefix_space         = false;
+    bool prefix_space_absent_default  = true;
+    std::string bos_token;
+    std::span<const std::pair<std::string_view, TokenId>> vision_special_tokens =
+        kVisionSpecialTokens;
+    std::span<const std::pair<std::string_view, TokenId>> config_only_tokens =
+        kConfigOnlyTokens;
+};
 
 struct FrontendResources;
 struct PreparedPromptData;
@@ -91,9 +126,11 @@ private:
     std::shared_ptr<const Impl> impl_;
 
     friend class FrontendTestAccess;
-    friend Frontend make_frontend(const FrontendResources& resources, bool vision_enabled);
+    friend Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
+                                  FrontendProfile profile);
 };
 
-[[nodiscard]] Frontend make_frontend(const FrontendResources& resources, bool vision_enabled);
+[[nodiscard]] Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
+                                     FrontendProfile profile = {});
 
 } // namespace ninfer::targets::qwen3_6
