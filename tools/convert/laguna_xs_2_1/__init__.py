@@ -1,1 +1,1 @@
-__init__.py
+__all__ = ["inventory", "recipe"]

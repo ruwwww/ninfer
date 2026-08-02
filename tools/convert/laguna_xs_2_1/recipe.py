@@ -12,6 +12,8 @@ from tools.convert.laguna_xs_2_1.common.recipe import (
     SOURCE_DTYPE,
     SourcePreflight,
     SourceTensor,
+    StackExpertDown,
+    StackExpertGateUp,
     TensorRecipe,
     expression_shape,
     expression_sources,
@@ -29,20 +31,17 @@ from . import inventory
 def _moe_recipes(source_prefix: str, object_prefix: str) -> tuple[TensorRecipe, ...]:
     """Build MoE expert source transforms for layers 1-39.
 
-    The checkpoint stores per-expert tensors:
-      experts.{e}.gate_up_proj  (1024, 2048)  — fused gate + up
-      experts.{e}.down_proj     (2048, 512)
-      shared_expert.gate_proj   (512, 2048)
-      shared_expert.up_proj     (512, 2048)
-      shared_expert.down_proj   (2048, 512)
-      gate.weight               (256, 2048)    — router
+    The checkpoint stores per-expert tensors separately:
+      experts.{e}.gate_proj.weight   (512, 2048)
+      experts.{e}.up_proj.weight     (512, 2048)
+      experts.{e}.down_proj.weight   (2048, 512)
 
     The artifact expects:
-      router_gate               (256, 2048)
-      routed_gate_up            (256*512, 2048) = (131072, 2048)  — expert-major, row-split
-      routed_down               (256*2048, 512) = (524288, 512)    — expert-major, row-split
-      shared_gate_up            (1024, 2048)   — concatenated gate+up
-      shared_down               (2048, 512)
+      router_gate                   (256, 2048)
+      routed_gate_up                (262144, 2048)  — 256 experts * 1024 fused rows
+      routed_down                   (524288, 512)   — 256 experts * 2048 rows
+      shared_gate_up                (1024, 2048)    — concatenated gate+up
+      shared_down                   (2048, 512)
     """
 
     return (
@@ -51,23 +50,15 @@ def _moe_recipes(source_prefix: str, object_prefix: str) -> tuple[TensorRecipe, 
             object_prefix + "router_gate",
             source(source_prefix + "gate.weight", (256, 2048)),
         ),
-        # Routed gate/up: reshape from (256, 1024, 2048) to (131072, 2048)
-        # The fused gate_up tensor has shape (num_experts, 2*moe_intermediate, hidden)
-        # We need (num_experts * moe_intermediate, hidden) = (256*512, 2048)
+        # Routed gate/up: stack all 256 experts' gate+up, concat along intermediate dim, flatten
         TensorRecipe(
             object_prefix + "routed_gate_up",
-            Reshape(
-                source(source_prefix + "experts.gate_up_proj", (256, 1024, 2048)),
-                (131072, 2048),
-            ),
+            StackExpertGateUp(source_prefix + "experts."),
         ),
-        # Routed down: reshape from (256, 2048, 512) to (524288, 512)
+        # Routed down: stack all 256 experts' down_proj, flatten to (524288, 512)
         TensorRecipe(
             object_prefix + "routed_down",
-            Reshape(
-                source(source_prefix + "experts.down_proj", (256, 2048, 512)),
-                (524288, 512),
-            ),
+            StackExpertDown(source_prefix + "experts."),
         ),
         # Shared gate/up: concatenate shared gate and up along row axis
         TensorRecipe(
@@ -174,7 +165,7 @@ def _build_text_recipes() -> tuple[TensorRecipe, ...]:
         if layer in inventory.DENSE_MLP_LAYERS:
             recipes.extend(_dense_mlp_recipes(source_prefix + "mlp.", object_prefix))
         else:
-            recipes.extend(_moe_recipes(source_prefix + "mlp.", object_prefix))
+            recipes.extend(_moe_recipes(source_prefix + "mlp.", object_prefix + "moe/"))
 
     recipes.extend(
         (

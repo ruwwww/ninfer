@@ -114,7 +114,7 @@ def _build_text_core_specs() -> tuple[TensorSpec, ...]:
             specs.extend(
                 (
                     tensor_spec(prefix + "moe/router_gate", (NUM_EXPERTS, HIDDEN_SIZE), BF16),
-                    tensor_spec(prefix + "moe/routed_gate_up", (NUM_EXPERTS * MOE_INTERMEDIATE, HIDDEN_SIZE), Q4),
+                    tensor_spec(prefix + "moe/routed_gate_up", (NUM_EXPERTS * 2 * MOE_INTERMEDIATE, HIDDEN_SIZE), Q4),
                     tensor_spec(
                         prefix + "moe/routed_down",
                         (NUM_EXPERTS * HIDDEN_SIZE, MOE_INTERMEDIATE),

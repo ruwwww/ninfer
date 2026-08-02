@@ -56,7 +56,41 @@ class Cast:
     dtype: str
 
 
-Expression = Slice | Reshape | Transpose | Concat | Cast | SourceTensor
+@dataclass(frozen=True, slots=True)
+class StackExpertGateUp:
+    """Concatenate gate and up projections per expert, then flatten to 2D.
+
+    Takes a source prefix pattern like "model.layers.{n}.mlp.experts." and
+    stacks all 256 experts' gate_proj and up_proj tensors, concatenating
+    gate+up along the intermediate dimension, then flattening to 2D.
+
+    Source shapes: per-expert tensors of shape (512, 2048) loaded from
+    "{prefix}{e}.gate_proj.weight" and "{prefix}{e}.up_proj.weight".
+    Output shape: (262144, 2048) = (256 * 1024, 2048).
+    """
+    source_prefix: str
+    num_experts: int = 256
+    moe_intermediate: int = 512
+
+
+@dataclass(frozen=True, slots=True)
+class StackExpertDown:
+    """Stack all experts' down_proj tensors and flatten to 2D.
+
+    Takes a source prefix pattern and stacks all per-expert down_proj
+    tensors into a single (num_experts * hidden, intermediate) tensor.
+
+    Source shapes: per-expert tensors of shape (hidden, moe_intermediate)
+    loaded from "{prefix}{e}.down_proj.weight".
+    Output shape: (524288, 512) = (256 * 2048, 512).
+    """
+    source_prefix: str
+    num_experts: int = 256
+    hidden: int = 2048
+    moe_intermediate: int = 512
+
+
+Expression = Slice | Reshape | Transpose | Concat | Cast | StackExpertGateUp | SourceTensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,14 +151,21 @@ def expression_shape(expression: Expression) -> tuple[int, ...]:
         for shape in shapes:
             if len(shape) != rank:
                 raise ValueError("concat sources have different ranks")
-            for axis, (got, expected) in enumerate(zip(shape, shapes[0])):
-                if axis != expression.axis and got != expected:
+            for dim, (got, expected) in enumerate(zip(shape, shapes[0])):
+                if dim != expression.axis and got != expected:
                     raise ValueError("concat sources have incompatible shapes")
-            output[expression.axis] += shape[axis]
+            output[expression.axis] += shape[expression.axis]
         return tuple(output)
 
     if isinstance(expression, Cast):
         return expression_shape(expression.source)
+
+    if isinstance(expression, StackExpertGateUp):
+        hidden = 2048  # known from Laguna config
+        return (expression.num_experts * 2 * expression.moe_intermediate, hidden)
+
+    if isinstance(expression, StackExpertDown):
+        return (expression.num_experts * expression.hidden, expression.moe_intermediate)
 
     raise TypeError(f"unknown recipe expression {type(expression)!r}")
 
@@ -134,6 +175,18 @@ def expression_sources(expression: Expression) -> tuple[SourceTensor, ...]:
         return (expression,)
     if isinstance(expression, (Slice, Reshape, Transpose, Cast)):
         return expression_sources(expression.source)
+    if isinstance(expression, StackExpertGateUp):
+        # Sources are all per-expert gate and up tensors
+        sources = []
+        for e in range(expression.num_experts):
+            sources.append(SourceTensor(f"{expression.source_prefix}{e}.gate_proj.weight", (expression.moe_intermediate, 2048)))
+            sources.append(SourceTensor(f"{expression.source_prefix}{e}.up_proj.weight", (expression.moe_intermediate, 2048)))
+        return tuple(sources)
+    if isinstance(expression, StackExpertDown):
+        sources = []
+        for e in range(expression.num_experts):
+            sources.append(SourceTensor(f"{expression.source_prefix}{e}.down_proj.weight", (expression.hidden, expression.moe_intermediate)))
+        return tuple(sources)
     if isinstance(expression, Concat):
         return tuple(item for part in expression.sources for item in expression_sources(part))
     raise TypeError(f"unknown recipe expression {type(expression)!r}")
@@ -233,6 +286,36 @@ def materialize_expression(
         tensor = materialize_expression(expression.source, reader, derived_tensors)
         return tensor.to(torch.float32)
 
+    if isinstance(expression, StackExpertGateUp):
+        gate_tensors = []
+        up_tensors = []
+        for e in range(expression.num_experts):
+            gate_name = f"{expression.source_prefix}{e}.gate_proj.weight"
+            up_name = f"{expression.source_prefix}{e}.up_proj.weight"
+            gate_tensor = reader.get(gate_name)
+            up_tensor = reader.get(up_name)
+            gate_tensors.append(gate_tensor)
+            up_tensors.append(up_tensor)
+        # Stack all gate tensors: (256, 512, 2048)
+        stacked_gate = torch.stack(gate_tensors, dim=0)
+        stacked_up = torch.stack(up_tensors, dim=0)
+        # Concatenate gate and up along axis 1 (moe_intermediate dim)
+        # (256, 512, 2048) + (256, 512, 2048) → (256, 1024, 2048)
+        fused = torch.cat((stacked_gate, stacked_up), dim=1)
+        # Flatten first two dimensions: (262144, 2048)
+        return fused.reshape(fused.size(0) * fused.size(1), fused.size(2))
+
+    if isinstance(expression, StackExpertDown):
+        down_tensors = []
+        for e in range(expression.num_experts):
+            down_name = f"{expression.source_prefix}{e}.down_proj.weight"
+            down_tensor = reader.get(down_name)
+            down_tensors.append(down_tensor)
+        # Stack all down tensors: (256, 2048, 512)
+        stacked = torch.stack(down_tensors, dim=0)
+        # Flatten first two dimensions: (524288, 512)
+        return stacked.reshape(stacked.size(0) * stacked.size(1), stacked.size(2))
+
     raise TypeError(f"unknown recipe expression {type(expression)!r}")
 
 
@@ -260,6 +343,8 @@ __all__ = [
     "Slice",
     "SourcePreflight",
     "SourceTensor",
+    "StackExpertDown",
+    "StackExpertGateUp",
     "TensorRecipe",
     "Transpose",
     "expression_shape",
