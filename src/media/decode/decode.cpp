@@ -261,7 +261,17 @@ public:
                            (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
         const int channels = alpha ? 4 : 3;
         std::vector<std::uint8_t> converted(static_cast<std::size_t>(width) * height * channels);
-        sws_ = sws_getCachedContext(sws_, width, height, static_cast<AVPixelFormat>(frame->format),
+        const AVPixelFormat src_format = static_cast<AVPixelFormat>(frame->format);
+        // FFmpeg 6.1's libswscale has a bug where sws_getCachedContext/sws_scale corrupt the heap
+        // when handling deprecated AV_PIX_FMT_YUVJ* pixel formats produced by the JPEG decoder.
+        // These formats have identical memory layouts to their AV_PIX_FMT_YUV* equivalents --
+        // the only difference is color range metadata. Convert them before passing to swscaler.
+        AVPixelFormat safe_src = src_format;
+        if (src_format == AV_PIX_FMT_YUVJ420P) { safe_src = AV_PIX_FMT_YUV420P; }
+        else if (src_format == AV_PIX_FMT_YUVJ422P) { safe_src = AV_PIX_FMT_YUV422P; }
+        else if (src_format == AV_PIX_FMT_YUVJ444P) { safe_src = AV_PIX_FMT_YUV444P; }
+        else if (src_format == AV_PIX_FMT_YUVJ411P) { safe_src = AV_PIX_FMT_YUV411P; }
+        sws_ = sws_getCachedContext(sws_, width, height, safe_src,
                                     width, height, alpha ? AV_PIX_FMT_RGBA : AV_PIX_FMT_RGB24,
                                     SWS_POINT, nullptr, nullptr, nullptr);
         if (sws_ == nullptr) { throw std::runtime_error("failed to create media color converter"); }
