@@ -12,7 +12,7 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "core/tensor.h"
-#include "ops/sparse_moe.h"
+#include "ninfer/ops/sparse_moe.h"
 
 #include <array>
 #include <cstdint>
@@ -25,12 +25,6 @@ namespace ninfer::targets::laguna_xs_2_1::detail {
 
 struct WeightPlan {
     artifact::ObjectHandle object;
-};
-
-// ---- WeightsProfile ----
-
-enum class WeightsProfile : std::uint8_t {
-    kGroupwiseInt = 0,
 };
 
 // ---- Payload types (runtime weight views per layer) ----
@@ -47,6 +41,8 @@ struct AttentionProjectionPayload {
 
 struct SparseMoePayload {
     ops::SparseMoeWeights op;
+    Weight e_score_correction_bias;  // [num_experts] load balancing bias
+    float moe_routed_scaling_factor = 2.5f;
 };
 
 struct DenseMlpPayload {

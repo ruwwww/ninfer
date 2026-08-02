@@ -1,7 +1,7 @@
 #include "targets/laguna_xs_2_1/impl/load/bindings.h"
 
 #include "artifact/reader.h"
-#include "artifact/materialize.h"
+#include "artifact/typed_binding.h"
 #include "targets/laguna_xs_2_1/impl/config.h"
 
 #include <stdexcept>

@@ -18,7 +18,11 @@
 
 namespace ninfer::ops {
 
+// Default head dimension (Qwen3.6 targets). Laguna XS 2.1 overrides via template parameter.
 inline constexpr int kGqaHeadDim = 256;
+
+// Laguna XS 2.1 head dimension
+inline constexpr int kGqaLagunaHeadDim = 128;
 
 struct GqaAppendInput {
     static constexpr bool writes_cache = true;

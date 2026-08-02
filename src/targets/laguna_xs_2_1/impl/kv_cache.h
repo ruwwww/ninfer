@@ -91,15 +91,15 @@ struct LagunaKVCacheLayout {
     std::int32_t  quant_group       = 0;
 
     // Per-layer regions — indexed by layer number (0..39)
-    std::vector<LayoutRegion> global_k;
-    std::vector<LayoutRegion> global_v;
-    std::vector<LayoutRegion> global_k_scale;
-    std::vector<LayoutRegion> global_v_scale;
+    std::vector<TensorRegion> global_k;
+    std::vector<TensorRegion> global_v;
+    std::vector<TensorRegion> global_k_scale;
+    std::vector<TensorRegion> global_v_scale;
 
-    std::vector<LayoutRegion> swa_k;
-    std::vector<LayoutRegion> swa_v;
-    std::vector<LayoutRegion> swa_k_scale;
-    std::vector<LayoutRegion> swa_v_scale;
+    std::vector<TensorRegion> swa_k;
+    std::vector<TensorRegion> swa_v;
+    std::vector<TensorRegion> swa_k_scale;
+    std::vector<TensorRegion> swa_v_scale;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
 };
@@ -145,9 +145,10 @@ struct LagunaKVCache {
     // Flat per-layer array for uniform indexing
     struct LayerView {
         bool is_swa = false;
-        union {
-            LagunaGlobalCacheView* global = nullptr;
-            LagunaSWACacheView* swa = nullptr;
+        union PtrUnion {
+            LagunaGlobalCacheView* global;
+            LagunaSWACacheView* swa;
+            PtrUnion() : global(nullptr) {}
         } ptr;
     };
     std::vector<LayerView> layers;

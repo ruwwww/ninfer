@@ -1,5 +1,9 @@
 #pragma once
 
+#include <array>
+#include <cmath>
+#include <string_view>
+
 // Compile-time model geometry for Laguna XS 2.1.
 //
 // Laguna uses a 1:3 alternating pattern of global (full) attention and

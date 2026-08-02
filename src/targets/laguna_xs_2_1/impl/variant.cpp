@@ -2,9 +2,15 @@
 
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
+#include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/rmsnorm.h"
+#include "ninfer/ops/rope.h"
+#include "ninfer/ops/silu_mul.h"
 #include "ninfer/ops/sparse_moe.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cuda_bf16.h>
 #include <stdexcept>
 #include <vector>
 
@@ -41,37 +47,57 @@ void Variant::attention_projection(
     const Tensor& hidden,
     const FullAttentionProjectionWeights& weights,
     int layer,
-    TextPhase /*phase*/,
+    TextPhase phase,
     Tensor& q_out, Tensor& k_out, Tensor& v_out,
-    WorkspaceArena& /*workspace*/,
+    WorkspaceArena& workspace,
     cudaStream_t stream)
 {
     const int T = static_cast<int>(hidden.ne[1]);
-    const int q_rows = q_rows(layer);
+    const int q_row_count = q_rows(layer);
     const int kv_rows = kv_heads * head_dim;
+    const bool is_full = is_full_attention(layer);
 
-    // QKV projections: separate weights
-    Tensor q_work = hidden.view({q_rows, T});
-    Tensor k_work = hidden.view({kv_rows, T});
-    Tensor v_work = hidden.view({kv_rows, T});
+    // Step 1: QKV GEMM projections
+    auto scope = workspace.scope();
 
-    // TODO: Actually compute QKV via GEMM. For now, these are view placeholders.
-    // The real implementation needs:
-    //   ops::linear(hidden, weights.q_proj, q_work, stream);
-    //   ops::linear(hidden, weights.k_proj, k_work, stream);
-    //   ops::linear(hidden, weights.v_proj, v_work, stream);
+    Tensor q_proj = workspace.alloc(DType::BF16, {q_row_count, T});
+    Tensor k_proj = workspace.alloc(DType::BF16, {kv_rows, T});
+    Tensor v_proj = workspace.alloc(DType::BF16, {kv_rows, T});
 
-    // Reshape to [head_dim, q_heads, T] / [head_dim, kv_heads, T]
-    const int q_heads = q_heads(layer);
-    q_out = q_work.view({head_dim, q_heads, T});
-    k_out = k_work.view({head_dim, kv_heads, T});
-    v_out = v_work.view({head_dim, kv_heads, T});
+    ops::linear(hidden, weights.q_proj, q_proj, stream);
+    ops::linear(hidden, weights.k_proj, k_proj, stream);
+    ops::linear(hidden, weights.v_proj, v_proj, stream);
 
-    // TODO: QK normalization (RMSNorm per-head, before RoPE)
-    // TODO: RoPE (YARN for full, standard for SWA)
-    (void)weights;
-    (void)layer;
-    (void)stream;
+    // Step 2: QK RMSNorm (per-head, before RoPE)
+    Tensor q_normed = workspace.alloc(DType::BF16, {head_dim, q_heads(layer), T});
+    Tensor k_normed = workspace.alloc(DType::BF16, {head_dim, kv_heads, T});
+
+    for (int h = 0; h < q_heads(layer); ++h) {
+        Tensor q_head = q_proj.slice(1, h, 1).view({head_dim, T});
+        Tensor q_norm_head = q_normed.slice(1, h, 1).view({head_dim, T});
+        ops::rmsnorm(q_head, weights.q_norm.tensor, TextConfig::rms_norm_eps, false, q_norm_head, stream);
+    }
+
+    for (int h = 0; h < kv_heads; ++h) {
+        Tensor k_head = k_proj.slice(1, h, 1).view({head_dim, T});
+        Tensor k_norm_head = k_normed.slice(1, h, 1).view({head_dim, T});
+        ops::rmsnorm(k_head, weights.k_norm.tensor, TextConfig::rms_norm_eps, false, k_norm_head, stream);
+    }
+
+    // Step 3: RoPE dispatch based on layer type
+    if (is_full) {
+        ops::rope(/*positions=*/{}, /*rotary_dim=*/64, TextConfig::RopeConfig::full_theta,
+                  q_normed, k_normed, stream);
+    } else {
+        ops::rope(/*positions=*/{}, /*rotary_dim=*/128, TextConfig::RopeConfig::swa_theta,
+                  q_normed, k_normed, stream);
+    }
+
+    q_out = q_normed;
+    k_out = k_normed;
+    v_out = v_proj.view({head_dim, kv_heads, T});
+
+    (void)phase;
 }
 
 // ---- Post-mixer ----
@@ -92,22 +118,17 @@ void Variant::post_mixer(
         const int intermediate = 8192;
         const int T = static_cast<int>(hidden.ne[1]);
 
-        Tensor gate_work = workspace.alloc(DType::BF16, {intermediate, T});
-        Tensor up_work = workspace.alloc(DType::BF16, {intermediate, T});
+        Tensor gate_up = workspace.alloc(DType::BF16, {2 * intermediate, T});
+        ops::linear(hidden, std::get<DenseMlpPayload>(weights).gate_proj, gate_up, stream);
 
-        ops::linear(hidden, std::get<DenseMlpPayload>(weights).gate_proj, gate_work, stream);
-        ops::linear(hidden, std::get<DenseMlpPayload>(weights).up_proj, up_work, stream);
-
-        // SwiGLU: activation = silu(gate) * up
-        // TODO: Implement or use ops::linear_swiglu
         Tensor activation = workspace.alloc(DType::BF16, {intermediate, T});
-        (void)activation;
+        ops::silu_mul(gate_up.slice(0, 0, intermediate),
+                      gate_up.slice(0, intermediate, intermediate), activation, stream);
 
-        // down = down_proj @ activation
         ops::linear_add(activation, std::get<DenseMlpPayload>(weights).down_proj, residual, stream);
 
     } else {
-        // Layers 1-39: MoE
+        // Layers 1-39: MoE with sigmoid router
         run_sparse_moe(hidden, std::get<SparseMoePayload>(weights).op, residual, workspace, stream);
     }
 
@@ -138,9 +159,9 @@ std::size_t Variant::attention_projection_workspace_capacity_bytes(
     const int kv_rows = kv_heads * head_dim;
 
     std::size_t bytes = 0;
-    bytes += static_cast<std::size_t>(max_q_rows) * max_tokens * sizeof(__nv_bfloat16);
-    bytes += static_cast<std::size_t>(kv_rows) * max_tokens * sizeof(__nv_bfloat16);
-    bytes += static_cast<std::size_t>(kv_rows) * max_tokens * sizeof(__nv_bfloat16);
+    bytes += static_cast<std::size_t>(max_q_rows) * max_tokens * sizeof(float);
+    bytes += static_cast<std::size_t>(kv_rows) * max_tokens * sizeof(float);
+    bytes += static_cast<std::size_t>(kv_rows) * max_tokens * sizeof(float);
     return bytes;
 }
 

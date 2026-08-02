@@ -3,9 +3,12 @@
 // Variant declaration for Laguna XS 2.1.
 
 #include "targets/laguna_xs_2_1/impl/config.h"
-#include "infra/array.h"
-#include "ops/sparse_moe.h"
+#include "ninfer/ops/sparse_moe.h"
 
+#include "core/arena.h"
+#include "core/tensor.h"
+
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 #include <cuda_runtime.h>
@@ -16,6 +19,20 @@
 #include <vector>
 
 namespace ninfer::targets::laguna_xs_2_1::detail {
+
+enum class WeightsProfile : std::uint8_t {
+    kGroupwiseInt = 0,
+};
+
+struct GraphFrontierRange {
+    std::uint32_t begin = 0;
+    std::uint32_t end   = 0;
+};
+
+enum class TextPhase : std::uint8_t {
+    Prefill = 0,
+    Decode  = 1,
+};
 
 // ---- Execution-leaf weight payloads ----
 
@@ -33,6 +50,8 @@ struct GdnProjectionPayload {};
 
 struct SparseMoePayload {
     ops::SparseMoeWeights op;
+    Weight e_score_correction_bias;  // [num_experts] load balancing bias
+    float moe_routed_scaling_factor = 2.5f;
 };
 
 struct DenseMlpPayload {

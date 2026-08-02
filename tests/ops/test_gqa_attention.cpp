@@ -532,7 +532,7 @@ int run_append_case(const Geometry& geometry, DType dtype, std::uint32_t seed) {
     Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
     Tensor tp(dpositions.data(), DType::I32, {tokens});
 
-    ops::gqa_kv_append(tk, tv, tp, cache.view(), nullptr);
+    ops::gqa_kv_append(tk, tv, tp, cache.view(), kHeadDim, nullptr);
     cuda_synchronize();
 
     const std::string label =
@@ -592,13 +592,13 @@ int run_a1_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
     const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
                                              test_case.envelope_max};
-    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
-        geometry.q_heads, dtype, envelope, test_case.tokens, test_case.tokens);
+const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+         geometry.q_heads, kHeadDim, dtype, envelope, test_case.tokens, test_case.tokens);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
     ops::gqa_attention(tq, tk, tv, tp, kAttentionScale, cache.view(), envelope, workspace, tout,
-                       nullptr);
+                       kHeadDim, nullptr);
     cuda_synchronize();
 
     const std::string label = case_label("gqa_attention", geometry, dtype, test_case);
@@ -652,13 +652,13 @@ int run_a3_case(const Geometry& geometry, DType dtype, const AttentionCase& test
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
     const ops::GqaExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
                                              test_case.envelope_max};
-    const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
-        geometry.q_heads, dtype, envelope, test_case.tokens, test_case.tokens);
+const std::size_t workspace_bytes = ops::gqa_attention_workspace_capacity_bytes(
+         geometry.q_heads, kHeadDim, dtype, envelope, test_case.tokens, test_case.tokens);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
     ops::gqa_attention_cached(tq, tp, kAttentionScale, cache.view(), envelope, workspace, tout,
-                              nullptr);
+                               kHeadDim, nullptr);
     cuda_synchronize();
 
     const std::string label = case_label("gqa_attention_cached", geometry, dtype, test_case);

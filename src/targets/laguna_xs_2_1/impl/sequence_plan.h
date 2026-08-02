@@ -9,7 +9,7 @@
 
 #include "core/device.h"
 #include "core/layout.h"
-#include "runtime/engine_options.h"
+#include "ninfer/types.h"
 
 #include <cstdint>
 #include <cstddef>

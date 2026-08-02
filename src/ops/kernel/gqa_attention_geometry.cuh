@@ -3,6 +3,8 @@
 // Exact grouped-query head geometries served by the Qwen3.6 GQA kernels. Head
 // dimension, cache format, and tile policy are shared; head mapping remains a
 // compile-time property so each registered shape gets an independent kernel.
+//
+// Laguna XS 2.1 adds <48,8> and <64,8> geometries with head_dim=128.
 
 namespace ninfer::ops {
 
@@ -21,5 +23,11 @@ struct GqaGeometry {
 
 using Gqa27Geometry = GqaGeometry<24, 4, 1>;
 using Gqa35Geometry = GqaGeometry<16, 2, 2>;
+
+// Laguna XS 2.1 full-attention layers: 48 query heads, 8 KV heads
+using GqaLagunaFullGeometry = GqaGeometry<48, 8, 1>;
+
+// Laguna XS 2.1 sliding-window layers: 64 query heads, 8 KV heads
+using GqaLagunaSwaGeometry = GqaGeometry<64, 8, 1>;
 
 } // namespace ninfer::ops

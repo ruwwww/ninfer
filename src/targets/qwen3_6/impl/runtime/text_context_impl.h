@@ -348,9 +348,9 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
     ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
 
-    Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
+Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     ops::gqa_attention(qn, kn, v, positions, kAttnScale, mtp_kv_->layer_view(0), envelope, work_, a,
-                       s);
+                       256, s);
     ops::sigmoid_mul(gate, a, s);
 
     const auto post = workspace_recipe::mtp_post_attention<TextConfig>(work_, T);
@@ -434,7 +434,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         Tensor kn = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
         ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
         ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, kn, s);
-        ops::gqa_kv_append(kn, v, positions, mtp_kv_->layer_view(0), s);
+        ops::gqa_kv_append(kn, v, positions, mtp_kv_->layer_view(0), 256, s);
 
         if (final_chunk) {
             const std::size_t column_bytes =
@@ -475,9 +475,9 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         }
         ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s);
 
-        Tensor a = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_q, 1});
+Tensor a = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_q, 1});
         ops::gqa_attention_cached(qn, last_position, kAttnScale, mtp_kv_->layer_view(0), envelope,
-                                  work_, a, s);
+                                   work_, a, 256, s);
         ops::sigmoid_mul(gate, a, s);
 
         Tensor o = work_.alloc(DType::BF16, {kCfg.hidden, 1});
@@ -691,9 +691,9 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
         active_rope_positions_ != nullptr ? *active_rope_positions_ : io_.rope_pos;
     ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
 
-    Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
+Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     ops::gqa_attention(qn, kn, v, cache_positions, kAttnScale, kv_.layer_view(fidx),
-                       *active_gqa_envelope_, work_, a, s);
+                        *active_gqa_envelope_, work_, a, 256, s);
     ops::sigmoid_mul(gate, a, s);
 
     Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph, work_, s);

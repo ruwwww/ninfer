@@ -50,10 +50,11 @@ struct GqaExecutionEnvelope {
  * profiles or intervals throw; a legal prompt route may return zero.
  */
 [[nodiscard]] std::size_t gqa_attention_workspace_capacity_bytes(std::int32_t q_heads,
-                                                                 DType cache_dtype,
-                                                                 GqaExecutionEnvelope envelope,
-                                                                 std::int32_t min_tokens,
-                                                                 std::int32_t max_tokens);
+                                                                  std::int32_t head_dim,
+                                                                  DType cache_dtype,
+                                                                  GqaExecutionEnvelope envelope,
+                                                                  std::int32_t min_tokens,
+                                                                  std::int32_t max_tokens);
 
 /**
  * A1: append K/V at the supplied absolute positions and compute causal grouped-query attention.
@@ -63,37 +64,34 @@ struct GqaExecutionEnvelope {
  *   probability = softmax_j(score)
  *   ideal[:,h,t] = sum_j probability[j] * V_cache[:,j,kvh].
  *
- * The registered geometries are `[256,24|4,T]` group 6 and `[256,16|2,T]` group 8. q/k/v/out
- * are contiguous BF16, positions is contiguous sequential I32 [T], and scale is 1/sqrt(256).
+ * Supported geometries:
+ *   - head_dim=256: [256,24|4,T] group 6 (Qwen3.6 27B), [256,16|2,T] group 8 (Qwen3.6 35B)
+ *   - head_dim=128: [128,48|8,T] group 6 (Laguna XS 2.1 full), [128,64|8,T] group 8 (Laguna SWA)
+ * q/k/v/out are contiguous BF16, positions is contiguous sequential I32 [T].
  * T may be any positive value that fits the declared cache and execution envelope.
- * Cache storage is BF16 or INT8-G64 under the shared numerical contract above. The caller
- * guarantees that every row in the causal domain is populated and that `positions[T-1]+1` lies in
- * the declared execution envelope. The envelope is a host launch-resource promise; it does not
- * alter the causal mask.
- *
- * q/k/v/positions/out, every cache plane, and live workspace suballocations are pairwise
- * non-overlapping. The Op overwrites every addressed cache row but owns no persistent frontier.
+ * Cache storage is BF16 or INT8-G64 under the shared numerical contract above.
  */
 void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
                    float scale, KVCacheLayerView cache, GqaExecutionEnvelope envelope,
-                   WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+                   WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
+                   cudaStream_t stream);
 
 /**
- * A2: perform only the cache-write part of A1. k/v are contiguous BF16 `[256,4|2,T]`, positions is
- * contiguous sequential I32 [T], and every addressed code and INT8 scale is overwritten. It reads
- * no unrelated cache row, receives no execution envelope, and owns no persistent frontier.
+ * A2: perform only the cache-write part of A1. k/v are contiguous BF16, positions is
+ * contiguous sequential I32 [T], and every addressed code and INT8 scale is overwritten.
+ * Supported head_dim: 256 (Qwen3.6) or 128 (Laguna XS 2.1).
  */
 void gqa_kv_append(const Tensor& k, const Tensor& v, const Tensor& positions,
-                   KVCacheLayerView cache, cudaStream_t stream);
+                    KVCacheLayerView cache, std::int32_t head_dim, cudaStream_t stream);
 
 /**
  * A3: compute causal attention from an already populated cache without accepting new K/V or
- * mutating any cache plane. q/out are contiguous BF16 `[256,24|16,T]`, positions is contiguous
- * sequential I32 [T], and the mathematical formula and execution-envelope contract are identical
- * to A1. Caller workspace is reported by gqa_attention_workspace_capacity_bytes().
+ * mutating any cache plane. q/out are contiguous BF16, positions is contiguous sequential I32 [T].
+ * Supported head_dim: 256 (Qwen3.6) or 128 (Laguna XS 2.1).
  */
 void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
                           const KVCacheLayerView& cache, GqaExecutionEnvelope envelope,
-                          WorkspaceArena& workspace, Tensor& out, cudaStream_t stream);
+                          WorkspaceArena& workspace, Tensor& out, std::int32_t head_dim,
+                          cudaStream_t stream);
 
 } // namespace ninfer::ops
