@@ -114,14 +114,30 @@ LoadedQwen3_6_35BA3B::LoadedQwen3_6_35BA3B(
 LoadedQwen3_6_35BA3B::~LoadedQwen3_6_35BA3B() = default;
 
 Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35BA3B> stable_loaded,
-                                               Qwen3_6_35BA3B::SequencePlan sequence_plan,
-                                               DeviceContext& device)
+                                                Qwen3_6_35BA3B::SequencePlan sequence_plan,
+                                                DeviceContext& device)
     : loaded(std::move(stable_loaded)),
       request_memory(device, sequence_plan.request_transient_capacity_bytes()),
       capacity(sequence_plan.capacity()),
       program(Qwen3_6_35BA3B::create_program(*loaded->model, std::move(sequence_plan), device)) {}
 
 Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
+
+LoadedLagunaXS21::LoadedLagunaXS21(
+    std::unique_ptr<LagunaXS21::LoadedModel> stable_model)
+    : model(std::move(stable_model)), frontend(LagunaXS21::make_frontend(*model)) {}
+
+LoadedLagunaXS21::~LoadedLagunaXS21() = default;
+
+LagunaXS21Instance::LagunaXS21Instance(std::unique_ptr<LoadedLagunaXS21> stable_loaded,
+                                                LagunaXS21::SequencePlan sequence_plan,
+                                                DeviceContext& device)
+    : loaded(std::move(stable_loaded)),
+      request_memory(device, sequence_plan.request_transient_capacity_bytes()),
+      capacity(sequence_plan.capacity()),
+      program(LagunaXS21::create_program(*loaded->model, std::move(sequence_plan), device)) {}
+
+LagunaXS21Instance::~LagunaXS21Instance() = default;
 
 ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
@@ -135,6 +151,10 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     }
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(
+            options, device, reader, load_start);
+    }
+    if (identity.model_id == LagunaXS21::model_id) {
+        return construct_registered<LagunaXS21, LoadedLagunaXS21, LagunaXS21Instance>(
             options, device, reader, load_start);
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
