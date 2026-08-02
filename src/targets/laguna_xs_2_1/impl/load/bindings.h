@@ -25,6 +25,7 @@ namespace ninfer::targets::laguna_xs_2_1::detail {
 
 struct WeightPlan {
     artifact::ObjectHandle object;
+    artifact::NumericFormat format = artifact::NumericFormat::BF16;
 };
 
 // ---- Payload types (runtime weight views per layer) ----
@@ -33,11 +34,13 @@ struct AttentionProjectionPayload {
     Weight q_proj;
     Weight k_proj;
     Weight v_proj;
-    Weight q_norm;
-    Weight k_norm;
-    Weight g_proj;
+    Tensor q_norm;
+    Tensor k_norm;
+    Tensor g_proj;
     Weight o_proj;
 };
+
+struct GdnProjectionPayload {};
 
 struct SparseMoePayload {
     ops::SparseMoeWeights op;
@@ -67,20 +70,21 @@ struct LayerBindingPlan {
     WeightPlan q_proj;
     WeightPlan k_proj;
     WeightPlan v_proj;
-    WeightPlan q_norm;
-    WeightPlan k_norm;
-    WeightPlan g_proj;
+    artifact::ObjectHandle q_norm;
+    artifact::ObjectHandle k_norm;
+    artifact::ObjectHandle g_proj;
     WeightPlan o_proj;
 
     struct {
-        WeightPlan gate_proj;
-        WeightPlan up_proj;
-        WeightPlan down_proj;
         WeightPlan router_gate;
         WeightPlan routed_gate_up;
         WeightPlan routed_down;
         WeightPlan shared_gate_up;
         WeightPlan shared_down;
+        // Dense MLP (layer 0 only)
+        WeightPlan gate_proj;
+        WeightPlan up_proj;
+        WeightPlan down_proj;
     } mlp;
 };
 
@@ -91,21 +95,21 @@ struct BindingPlan {
     qwen3_6::StartupFeatures features;
     WeightPlan token_embedding;
     std::array<LayerBindingPlan, 40> layers;
-    WeightPlan final_norm;
+    artifact::ObjectHandle final_norm;
     WeightPlan output_head;
 };
 
 // ---- Loaded model data ----
 
 struct LoadedModelData {
-    qwen3_6::FrontendResourceStore frontend;
+    qwen3_6::FrontendResources frontend;
     qwen3_6::StartupFeatures features;
     Weight token_embedding;
     struct {
         AttentionProjectionPayload attn;
         PostMixerPayload mixer;
     } layers[40];
-    Weight final_norm;
+    Tensor final_norm;
     Weight output_head;
 };
 
@@ -133,6 +137,15 @@ struct ArtifactLoadPlan {
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder,
                                 WeightsProfile profile,
                                 qwen3_6::StartupFeatures features);
+
+// ---- materialize_weights: convert bound plans to runtime weights ----
+
+/**
+ * Materialize bound weight plans into runtime Weight/Tensor objects
+ * using the materialized artifact data.
+ */
+LoadedModelData materialize_weights(BindingPlan&& plan,
+                                     artifact::MaterializedArtifact&& materialized);
 
 // ---- PIMPL implementations ----
 

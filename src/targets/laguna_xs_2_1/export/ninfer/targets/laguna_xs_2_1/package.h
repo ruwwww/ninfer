@@ -97,9 +97,9 @@ struct Package {
     [[nodiscard]] static std::unique_ptr<LoadedModel>
     construct_loaded_model(LoadPlan&& plan, artifact::MaterializedArtifact&& materialized);
     [[nodiscard]] static Frontend make_frontend(const LoadedModel& model);
-    [[nodiscard]] static SequencePlan plan_sequence(DeviceContext& device,
-                                                     const EngineOptions& options,
-                                                     WeightsProfile weights_profile);
+[[nodiscard]] static SequencePlan plan_sequence(DeviceContext& /*device*/,
+                                                      const EngineOptions& options,
+                                                      WeightsProfile weights_profile);
     [[nodiscard]] static std::unique_ptr<Program>
     create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device);
 };

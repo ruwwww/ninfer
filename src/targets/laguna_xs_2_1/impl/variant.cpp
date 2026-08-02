@@ -75,13 +75,13 @@ void Variant::attention_projection(
     for (int h = 0; h < q_heads(layer); ++h) {
         Tensor q_head = q_proj.slice(1, h, 1).view({head_dim, T});
         Tensor q_norm_head = q_normed.slice(1, h, 1).view({head_dim, T});
-        ops::rmsnorm(q_head, weights.q_norm.tensor, TextConfig::rms_norm_eps, false, q_norm_head, stream);
+        ops::rmsnorm(q_head, weights.q_norm, TextConfig::rms_norm_eps, false, q_norm_head, stream);
     }
 
     for (int h = 0; h < kv_heads; ++h) {
         Tensor k_head = k_proj.slice(1, h, 1).view({head_dim, T});
         Tensor k_norm_head = k_normed.slice(1, h, 1).view({head_dim, T});
-        ops::rmsnorm(k_head, weights.k_norm.tensor, TextConfig::rms_norm_eps, false, k_norm_head, stream);
+        ops::rmsnorm(k_head, weights.k_norm, TextConfig::rms_norm_eps, false, k_norm_head, stream);
     }
 
     // Step 3: RoPE dispatch based on layer type
@@ -125,7 +125,7 @@ void Variant::post_mixer(
         ops::silu_mul(gate_up.slice(0, 0, intermediate),
                       gate_up.slice(0, intermediate, intermediate), activation, stream);
 
-        ops::linear_add(activation, std::get<DenseMlpPayload>(weights).down_proj, residual, stream);
+        ops::linear_add(activation, std::get<DenseMlpPayload>(weights).down_proj, residual, workspace, stream);
 
     } else {
         // Layers 1-39: MoE with sigmoid router

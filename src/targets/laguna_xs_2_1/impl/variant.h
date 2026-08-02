@@ -3,7 +3,7 @@
 // Variant declaration for Laguna XS 2.1.
 
 #include "targets/laguna_xs_2_1/impl/config.h"
-#include "ninfer/ops/sparse_moe.h"
+#include "targets/laguna_xs_2_1/impl/load/bindings.h"
 
 #include "core/arena.h"
 #include "core/tensor.h"
@@ -13,16 +13,11 @@
 #include <cstddef>
 #include <cuda_runtime.h>
 #include <string_view>
-#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace ninfer::targets::laguna_xs_2_1::detail {
-
-enum class WeightsProfile : std::uint8_t {
-    kGroupwiseInt = 0,
-};
 
 struct GraphFrontierRange {
     std::uint32_t begin = 0;
@@ -34,38 +29,11 @@ enum class TextPhase : std::uint8_t {
     Decode  = 1,
 };
 
-// ---- Execution-leaf weight payloads ----
-
-struct AttentionProjectionPayload {
-    Weight q_proj;
-    Weight k_proj;
-    Weight v_proj;
-    Weight q_norm;
-    Weight k_norm;
-    Weight g_proj;
-    Weight o_proj;
-};
-
-struct GdnProjectionPayload {};
-
-struct SparseMoePayload {
-    ops::SparseMoeWeights op;
-    Weight e_score_correction_bias;  // [num_experts] load balancing bias
-    float moe_routed_scaling_factor = 2.5f;
-};
-
-struct DenseMlpPayload {
-    Weight gate_proj;
-    Weight up_proj;
-    Weight down_proj;
-};
-
-using PostMixerWeights = std::variant<DenseMlpPayload, SparseMoePayload>;
-
 // ---- Variant struct ----
 
 struct Variant {
-    using WeightsProfile = detail::WeightsProfile;
+    using ModelView                      = detail::LoadedModelData;
+    using WeightsProfile                 = detail::WeightsProfile;
     using FullAttentionProjectionWeights = AttentionProjectionPayload;
     using GdnProjectionWeights           = GdnProjectionPayload;
     using PostMixerWeights               = std::variant<DenseMlpPayload, SparseMoePayload>;

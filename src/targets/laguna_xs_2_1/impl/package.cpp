@@ -5,7 +5,7 @@
 #include "artifact/reader.h"
 #include "targets/laguna_xs_2_1/impl/load/bindings.h"
 #include "targets/laguna_xs_2_1/impl/variant.h"
-#include "targets/laguna_xs_2_1/impl/sequence_plan.h"
+#include "targets/laguna_xs_2_1/impl/runtime/layouts.h"
 
 #include <stdexcept>
 #include <utility>
@@ -60,9 +60,9 @@ Package::Frontend Package::make_frontend(const LoadedModel& model) {
                                    model.impl_->data.features.vision);
 }
 
-Package::SequencePlan Package::plan_sequence(DeviceContext& device, const EngineOptions& options,
-                                               WeightsProfile weights_profile) {
-    return ::ninfer::targets::laguna_xs_2_1::plan_sequence(device, options, weights_profile);
+Package::SequencePlan Package::plan_sequence(DeviceContext& /*device*/, const EngineOptions& options,
+                                                WeightsProfile weights_profile) {
+    return ::ninfer::targets::laguna_xs_2_1::plan_sequence(options, weights_profile);
 }
 
 std::unique_ptr<Package::Program>
