@@ -12,7 +12,7 @@ runtime:
 | Model | Weights | NInfer artifact | Size | SHA-256 |
 |---|---|---|---:|---|
 | [Qwen3.5-9B](https://huggingface.co/ruwwww/qwen3.5-9b-ninfer) | `groupwise-int` | `qwen3_5_9b.ninfer` | 6,514,051,328 bytes (6.07 GiB) | `5e823ea5b4df7c75c630cb5ff90017cf17769c68bbf9545640cf981af5ec7bd6` |
-| [Ornith-1.5-9B](https://huggingface.co/ornith-ai/Ornith-1.5-9B-NVFP4) | `groupwise-int` | `ornith_1_5_9b.ninfer` | 6,514,051,072 bytes (6.07 GiB) | local build |
+| [Ornith-1.5-9B](https://huggingface.co/ruwwww/ornith-1.5-9b-ninfer) | `groupwise-int` | `ornith_1_5_9b.ninfer` | 6,514,051,072 bytes (6.07 GiB) | `c465a06c9d32339493fd5000512724604b12965eb0a8963abe90acfc470f3fbe` |
 | [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `groupwise-int` | `qwen3_6_27b.ninfer` | 17,495,365,888 bytes (16.29 GiB) | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
 | [Qwen3.6-27B NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` | 18,324,064,000 bytes (17.07 GiB) | `bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a` |
 | [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `groupwise-int` | `qwen3_8_27b.ninfer` | 18,210,531,328 bytes (16.96 GiB) | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
@@ -244,6 +244,11 @@ docker run --rm \
 Use the Hugging Face CLI to download one of the registered artifacts:
 
 ```bash
+hf download ruwwww/ornith-1.5-9b-ninfer \
+  ornith_1_5_9b.ninfer \
+  --local-dir models
+
+# Or Qwen3.5-9B:
 hf download ruwwww/qwen3.5-9b-ninfer \
   qwen3_5_9b.ninfer \
   --local-dir models
