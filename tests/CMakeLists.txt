@@ -72,6 +72,7 @@ ninfer_add_test(ninfer_sampling_defaults_test
   SOURCES test_sampling_defaults.cpp
   LIBRARIES ninfer_engine)
 target_include_directories(ninfer_sampling_defaults_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_5_9b/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)

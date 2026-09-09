@@ -18,6 +18,7 @@ The executable `--help` output is the exact source for command-line option spell
 
 | Model | Weights | Download | Versioned model card source |
 |---|---|---|---|
+| Ornith-1.5-9B | `groupwise-int` | Build locally from the [NVFP4 source checkpoint](https://huggingface.co/ornith-ai/Ornith-1.5-9B-NVFP4) | — |
 | Qwen3.6-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | [model card](../model-cards/Qwen3.6-27B-NInfer/README.md) |
 | Qwen3.6-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) |
 | Qwen3.8-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | [model card](../model-cards/Qwen3.8-27B-NInfer/README.md) |
@@ -55,6 +56,7 @@ Artifact and model references:
 - [Qwen3.8-27B artifact contracts, including the NVFP4 target](maintainer/qwen3.8-27b-artifact.md)
 - [Qwen3.6-35B-A3B model semantics](maintainer/qwen3.6-35b-a3b-model.md)
 - [Qwen3.6-35B-A3B artifact contracts](maintainer/qwen3.6-35b-a3b-artifact.md)
+- [Ornith-1.5-9B artifact contract](maintainer/ornith-1.5-9b-artifact.md)
 
 Pending implementation work:
 
