@@ -201,6 +201,10 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
         return construct_registered<Qwen3_5_9B, LoadedQwen3_5_9B, Qwen3_5_9BInstance>(
             options, device, reader, load_start, Qwen3_5_9B::target_key);
     }
+    if (identity.model_id == Qwen3_5_9B::ornith_model_id) {
+        return construct_registered<Qwen3_5_9B, LoadedQwen3_5_9B, Qwen3_5_9BInstance>(
+            options, device, reader, load_start, Qwen3_5_9B::ornith_target_key);
+    }
     if (identity.model_id == Qwen3_6_27B::model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
             options, device, reader, load_start, Qwen3_6_27B::target_key);

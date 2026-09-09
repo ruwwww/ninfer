@@ -2,7 +2,7 @@
 
 > Selected checkpoints. Maximum single-GPU inference performance.
 
-NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints on
+NInfer is a from-scratch C++/CUDA inference engine for explicitly registered model artifacts on
 NVIDIA Blackwell GPUs (verified on RTX 5090 and RTX 5060 Ti). It runs text, image, and video prompts
 through a local CLI or OpenAI-/Anthropic-compatible HTTP APIs.
 
@@ -12,17 +12,22 @@ runtime:
 | Model | Weights | NInfer artifact | Size | SHA-256 |
 |---|---|---|---:|---|
 | [Qwen3.5-9B](https://huggingface.co/ruwwww/qwen3.5-9b-ninfer) | `groupwise-int` | `qwen3_5_9b.ninfer` | 6,514,051,328 bytes (6.07 GiB) | `5e823ea5b4df7c75c630cb5ff90017cf17769c68bbf9545640cf981af5ec7bd6` |
+| [Ornith-1.5-9B](https://huggingface.co/ruwwww/ornith-1.5-9b-ninfer) | `groupwise-int` | `ornith_1_5_9b.ninfer` | 6,514,051,072 bytes (6.07 GiB) | `c465a06c9d32339493fd5000512724604b12965eb0a8963abe90acfc470f3fbe` |
 | [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `groupwise-int` | `qwen3_6_27b.ninfer` | 17,495,365,888 bytes (16.29 GiB) | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
 | [Qwen3.6-27B NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` | 18,324,064,000 bytes (17.07 GiB) | `bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a` |
 | [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `groupwise-int` | `qwen3_8_27b.ninfer` | 18,210,531,328 bytes (16.96 GiB) | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
 | [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 bytes (20.02 GiB) | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
 | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | 22,783,246,080 bytes (21.22 GiB) | `1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2` |
 
-The 9B artifact binds to the registered `qwen3_5_9b` target: a 4,096-wide, 32-layer dense model
+The Qwen3.5 9B artifact binds to the registered `qwen3_5_9b` target: a 4,096-wide, 32-layer dense model
 with a mixed linear/full-attention backbone (24 linear-attention and 8 full-attention layers) and
 one MTP layer, quantized to the same groupwise-int profile as the 27B/35B-A3B targets. Prefill
 activations match the source BF16 model exactly (top-10 logits byte-identical), and greedy decode
 tracks the reference until near-tie logits fall within quantization drift.
+
+Ornith-1.5-9B uses the same registered 9B execution geometry and MTP route under target key
+`ornith_1_5_9b`; its converter dequantizes the official NVFP4/FP8 source checkpoint to BF16 before
+applying the groupwise-int profile and preserves Ornith's ThinkingToggle frontend.
 
 Qwen3.6-27B and Qwen3.8-27B each expose two registered weight profiles. The version-2 artifact
 identity selects the profile without a separate runtime flag; Qwen3.8 uses target key
@@ -239,6 +244,11 @@ docker run --rm \
 Use the Hugging Face CLI to download one of the registered artifacts:
 
 ```bash
+hf download ruwwww/ornith-1.5-9b-ninfer \
+  ornith_1_5_9b.ninfer \
+  --local-dir models
+
+# Or Qwen3.5-9B:
 hf download ruwwww/qwen3.5-9b-ninfer \
   qwen3_5_9b.ninfer \
   --local-dir models

@@ -15,6 +15,7 @@ for the selected tool.
 | Build the 27B artifact | [`convert/qwen3_6_27b/`](convert/qwen3_6_27b/) |
 | Build the Qwen3.8-27B artifact | [`convert/qwen3_8_27b/`](convert/qwen3_8_27b/) |
 | Build the 35B-A3B artifact | [`convert/qwen3_6_35b_a3b/`](convert/qwen3_6_35b_a3b/) |
+| Build the Ornith-1.5-9B artifact | [`convert/ornith_1_5_9b/`](convert/ornith_1_5_9b/) |
 | Inspect artifact metadata and objects | [`artifact/inspect.py`](artifact/inspect.py) |
 | Run the 27B Python reference | [`reference/qwen3_6_27b/`](reference/qwen3_6_27b/README.md) |
 | Run the 35B-A3B Python reference | [`reference/qwen3_6_35b_a3b/`](reference/qwen3_6_35b_a3b/README.md) |
@@ -41,7 +42,15 @@ python3 -m tools.convert.qwen3_6_35b_a3b.convert \
   --model /path/to/Qwen3.6-35B-A3B-base \
   --dflash-model /path/to/Qwen3.6-35B-A3B-DFlash \
   --out out/qwen3_6_35b_a3b.ninfer
+
+python3 -m tools.convert.ornith_1_5_9b.convert \
+  --model /path/to/Ornith-1.5-9B-NVFP4 \
+  --out models/ornith_1_5_9b.ninfer
 ```
+
+The Ornith converter accepts the official single-file NVFP4 checkpoint, decodes its NVFP4 and
+FP8 source weights to logical BF16 while reading shards, and then applies NInfer's registered
+`groupwise-int` quantization profile. It does not require the separate BF16 checkpoint.
 
 Inspect either result:
 

@@ -17,6 +17,7 @@ from tools.artifact.numeric import QuantFormat, get_format
 
 
 _FP16_MIN_SUBNORMAL = 2.0**-24
+_QUANTIZE_ROW_CHUNK = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,25 +92,35 @@ def quantize_matrix(
 
     geometry = row_split_geometry(spec, weight.shape)
     target = pick_device() if device is None else pick_device(device)
-    logical = weight.detach().to(device=target, dtype=torch.float32)
-    if geometry.k_pad != geometry.k:
-        physical = torch.zeros(
-            (geometry.n, geometry.k_pad), dtype=torch.float32, device=target
-        )
-        physical[:, : geometry.k].copy_(logical)
-        logical = physical
+    codes_parts: list[torch.Tensor] = []
+    scale_parts: list[torch.Tensor] = []
+    for begin in range(0, geometry.n, _QUANTIZE_ROW_CHUNK):
+        end = min(begin + _QUANTIZE_ROW_CHUNK, geometry.n)
+        logical = weight[begin:end].detach().to(device=target, dtype=torch.float32)
+        if geometry.k_pad != geometry.k:
+            physical = torch.zeros(
+                (end - begin, geometry.k_pad), dtype=torch.float32, device=target
+            )
+            physical[:, : geometry.k].copy_(logical)
+            logical = physical
 
-    grouped = logical.reshape(
-        geometry.n, geometry.groups_per_row, spec.group_size
+        grouped = logical.reshape(
+            end - begin, geometry.groups_per_row, spec.group_size
+        )
+        max_abs = grouped.abs().amax(dim=2)
+        host_scales, host_reciprocal = _canonical_scale_words(max_abs, spec.qmax)
+        scales = host_scales.to(target)
+        reciprocal = host_reciprocal.to(target)
+        codes = torch.clamp(
+            torch.round(grouped * reciprocal.unsqueeze(-1)), spec.qmin, spec.qmax
+        ).to(torch.int8)
+        codes_parts.append(codes)
+        scale_parts.append(scales)
+
+    return QuantizedMatrix(
+        codes=torch.cat(codes_parts, dim=0),
+        scales=torch.cat(scale_parts, dim=0),
     )
-    max_abs = grouped.abs().amax(dim=2)
-    host_scales, host_reciprocal = _canonical_scale_words(max_abs, spec.qmax)
-    scales = host_scales.to(target)
-    reciprocal = host_reciprocal.to(target)
-    codes = torch.clamp(
-        torch.round(grouped * reciprocal.unsqueeze(-1)), spec.qmin, spec.qmax
-    ).to(torch.int8)
-    return QuantizedMatrix(codes=codes, scales=scales)
 
 
 def quantize_and_encode(
@@ -124,7 +135,40 @@ def quantize_and_encode(
     if not isinstance(spec, QuantFormat):
         raise ValueError("grouped quantization requires a quantized numeric format")
     quantized = quantize_matrix(weight, spec, device=device)
-    return encode_row_split(quantized.codes, quantized.scales, spec, weight.shape)
+    geometry = row_split_geometry(spec, weight.shape)
+    if geometry.n <= _QUANTIZE_ROW_CHUNK:
+        return encode_row_split(quantized.codes, quantized.scales, spec, weight.shape)
+
+    # The row-split format has independent base, high-bit, and scale planes.
+    # Encode bounded row ranges and place each plane directly into the final
+    # geometry; this avoids the large temporary bit-expansion tensors used by
+    # the generic whole-matrix packer for Q5/Q6.
+    payload = bytearray(geometry.payload_bytes)
+    for begin in range(0, geometry.n, _QUANTIZE_ROW_CHUNK):
+        end = min(begin + _QUANTIZE_ROW_CHUNK, geometry.n)
+        chunk_shape = (end - begin, geometry.k)
+        chunk_geometry = row_split_geometry(spec, chunk_shape)
+        chunk = encode_row_split(
+            quantized.codes[begin:end], quantized.scales[begin:end], spec, chunk_shape
+        )
+
+        base_begin = begin * geometry.base_row_bytes
+        base_end = base_begin + chunk_geometry.base_bytes
+        payload[base_begin:base_end] = chunk[: chunk_geometry.base_bytes]
+
+        high_begin = geometry.high_offset + begin * geometry.high_row_bytes
+        high_end = high_begin + chunk_geometry.high_bytes
+        payload[high_begin:high_end] = chunk[
+            chunk_geometry.high_offset : chunk_geometry.high_offset + chunk_geometry.high_bytes
+        ]
+
+        scale_begin = geometry.scale_offset + begin * geometry.scale_row_bytes
+        scale_end = scale_begin + chunk_geometry.scale_bytes
+        payload[scale_begin:scale_end] = chunk[
+            chunk_geometry.scale_offset : chunk_geometry.scale_offset + chunk_geometry.scale_bytes
+        ]
+
+    return bytes(payload)
 
 
 __all__ = [

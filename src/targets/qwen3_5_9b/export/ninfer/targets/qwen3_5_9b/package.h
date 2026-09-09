@@ -76,8 +76,10 @@ private:
 } // namespace detail
 
 struct Package {
-    static constexpr std::string_view model_id   = "qwen3.5-9b";
-    static constexpr std::string_view target_key = "qwen3_5_9b";
+    static constexpr std::string_view model_id          = "qwen3.5-9b";
+    static constexpr std::string_view target_key        = "qwen3_5_9b";
+    static constexpr std::string_view ornith_model_id   = "ornith-1.5-9b";
+    static constexpr std::string_view ornith_target_key = "ornith_1_5_9b";
 
     using WeightsProfile = detail::WeightsProfile;
     using LoadPlan       = detail::LoadPlan;

@@ -58,14 +58,15 @@ constexpr ModelSamplingDefaults kQwen3_5Defaults{
 } // namespace
 
 ModelSamplingDefaults Package::sampling_defaults(std::string_view model) {
-    if (model == model_id) { return kQwen3_5Defaults; }
+    if (model == model_id || model == ornith_model_id) { return kQwen3_5Defaults; }
     throw std::runtime_error("model '" + std::string(model) +
                              "' has no sampling defaults in target package '" +
                              std::string(target_key) + "'");
 }
 
 Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentity& identity) {
-    if (identity.model_id == model_id && identity.weights_id == "groupwise-int") {
+    if ((identity.model_id == model_id || identity.model_id == ornith_model_id) &&
+        identity.weights_id == "groupwise-int") {
         return WeightsProfile::GroupwiseInt;
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
