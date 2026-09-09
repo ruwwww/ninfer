@@ -147,6 +147,36 @@ Committed decode throughput across concurrent request waves with MTP3 (draft win
 | **C=4** | 1,024 tok | 5.019 s | **204.0 tok/s** | 197.4 tok/s | **1.72×** |
 | **C=8** | 2,048 tok | 6.443 s | **317.9 tok/s** | **347.8 tok/s** | **2.68× (2.93× decode)** |
 
+**Ornith-1.5-9B (`groupwise-int`) Single-Request Serving on RTX 5060 Ti**
+
+Single-run verification through the CLI and serving route with INT8 KV, a 4,096-token prefill chunk, 32,768-token max context, MTP with 3 draft tokens, and `--lm-head-draft`:
+
+| Prompt tokens | Prefill tok/s | Decode tok/s | MTP acceptance | Note |
+|---:|---:|---:|---:|---|
+| 27,025 | 2,523.1 | 131.8 | 66.7% (3.00 tok/round) | cold cache, needle retrieved ("The fox jumped over the lazy dog.") |
+| 2,010 | 2,580.8 | 72.7 | — | greedy, MTP off, 16 gen |
+
+A 27,025-token needle-in-haystack request retrieved the planted sentence with exact accuracy, confirming long-context correctness and sustained ~2.5k tok/s prefill speed on this card.
+
+**Ornith-1.5-9B (`groupwise-int`) Concurrent MTP3 Serving on RTX 5060 Ti**
+
+Committed decode throughput across concurrent request waves with MTP3 (draft window 3) and `--lm-head-draft` on NVIDIA GeForce RTX 5060 Ti (16 GB):
+
+| Concurrency | Total Generated | Total Time | Aggregate Throughput | Steady-State Decode Speed | Scaling vs C=1 |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **C=1** | 256 tok | 2.366 s | **108.2 tok/s** | 108.2 tok/s | 1.00× |
+| **C=4** | 1,024 tok | 5.359 s | **191.1 tok/s** | 191.1 tok/s | **1.77×** |
+| **C=8** | 2,048 tok | 6.609 s | **309.9 tok/s** | **339.6 tok/s** | **2.86× (3.14× decode)** |
+
+Long-context concurrent waves (1,953 prompt tokens per stream + 256 generated tokens per lane):
+
+| Concurrency | Prompt Tok / Lane | Total Generated | Total Time | Aggregate Throughput | Scaling vs C=1 |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **C=1** | 1,953 tok | 256 tok | 2.897 s | **88.4 tok/s** | 1.00× |
+| **C=2** | 1,953 tok | 512 tok | 4.748 s | **107.8 tok/s** | 1.22× |
+| **C=4** | 1,953 tok | 1,024 tok | 8.070 s | **126.9 tok/s** | 1.44× |
+| **C=8** | 1,953 tok | 2,048 tok | 9.412 s | **217.6 tok/s** | **2.46×** |
+
 See [Performance](docs/performance.md) for the full methodology, variability, reproduction command,
 and per-fixture results.
 
