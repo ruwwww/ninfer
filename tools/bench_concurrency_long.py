@@ -148,6 +148,12 @@ def main():
     parser.add_argument("--concurrencies", nargs="+", type=int, default=[1, 2, 4, 8])
     parser.add_argument("--port", type=int, default=8092)
     parser.add_argument("--max-tokens", type=int, default=256)
+    parser.add_argument(
+        "--kv-dtype",
+        choices=("bf16", "int8", "fp8", "nvfp4", "k8v4"),
+        default="int8",
+        help="KV-cache storage dtype (default: int8)",
+    )
     args = parser.parse_args()
 
     max_c = max(args.concurrencies)
@@ -167,11 +173,12 @@ def main():
         "--prefill-chunk",
         "4096",
         "--kv-dtype",
-        "int8",
+        args.kv_dtype,
         "--spec",
         "mtp",
         "--draft-tokens",
         "3",
+        "--lm-head-draft",
         "--model-id",
         "ornith-1.5-9b",
         "--default-max-tokens",
