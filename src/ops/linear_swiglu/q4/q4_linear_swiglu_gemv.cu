@@ -46,14 +46,15 @@ struct Q4SwiGluSmallTRows {
 template <int kIntermediate>
 struct Q4SwiGluSmallTEpilogue {
     __nv_bfloat16* out;
+    int columns;
 
     template <int ActiveCols>
     __device__ __forceinline__ void store(int row, int col0, float4 projected) const {
-        if (col0 < ActiveCols) {
+        if (col0 < columns) {
             out[static_cast<std::int64_t>(col0) * kIntermediate + row] =
                 __float2bfloat16_rn(silu(projected.x) * projected.z);
         }
-        if (col0 + 1 < ActiveCols) {
+        if (col0 + 1 < columns) {
             out[static_cast<std::int64_t>(col0 + 1) * kIntermediate + row] =
                 __float2bfloat16_rn(silu(projected.y) * projected.w);
         }
@@ -67,13 +68,15 @@ void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaSt
     constexpr int TileCols =
         ActiveCols <= 8 ? 8 : (ActiveCols <= 16 ? 16 : (ActiveCols <= 24 ? 24 : 32));
     constexpr int kBlocks = kIntermediate / Q4SwiGluSmallTRows<kIntermediate>::kOutputRowsPerCta;
-    const Q4SwiGluSmallTEpilogue<kIntermediate> epilogue{static_cast<__nv_bfloat16*>(out.data)};
+    const Q4SwiGluSmallTEpilogue<kIntermediate> epilogue{static_cast<__nv_bfloat16*>(out.data),
+                                                          x.ne[1]};
     q4_small_t_mma_kernel<Q4SwiGluSmallTGeometry<kIntermediate, kK>, TileCols, ActiveCols,
-                          Q4SwiGluSmallTEpilogue<kIntermediate>, Q4SwiGluSmallTRows<kIntermediate>>
+                          Q4SwiGluSmallTEpilogue<kIntermediate>, Q4SwiGluSmallTRows<kIntermediate>,
+                          true>
         <<<kBlocks, Q4DraftSmallTSchedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
             static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data),
-            epilogue, Q4SwiGluSmallTRows<kIntermediate>{});
+            epilogue, Q4SwiGluSmallTRows<kIntermediate>{}, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -235,7 +238,7 @@ void q4_linear_swiglu_gemv_pair_launch(const Tensor& x, const Weight& w, Tensor&
     }
 }
 
-void q4_linear_swiglu_small_t_exact_launch(const Tensor& x, const Weight& w, Tensor& out,
+void q4_linear_swiglu_small_t_tiled_launch(const Tensor& x, const Weight& w, Tensor& out,
                                            cudaStream_t stream) {
     if (x.ne[1] < 2 || x.ne[1] > 32) {
         throw std::invalid_argument("Q4 LinearSwiGLU exact small-T requires T=2..32");

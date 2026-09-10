@@ -69,16 +69,21 @@ struct VisionConfig : qwen3_6::VisionBackboneConfig {
 };
 
 struct DFlashConfig {
-    static constexpr bool supported     = false;
-    static constexpr int local_layers   = 0;
-    static constexpr int local_capacity = 0;
-    static constexpr int kv_heads       = 0;
-    static constexpr int head_dim       = 0;
-    static constexpr int feature_rows   = 0;
-    static constexpr int hidden         = 0;
-    static constexpr int intermediate   = 0;
-    static constexpr int query_size     = 0;
-    static constexpr int kv_size        = 0;
+    static constexpr bool supported             = false;
+    static constexpr SpeculativeBackend backend = SpeculativeBackend::None;
+    static constexpr bool coherent_selector     = false;
+    static constexpr int local_layers           = 0;
+    static constexpr int full_layers            = 0;
+    static constexpr int local_capacity         = 0;
+    static constexpr int kv_heads               = 0;
+    static constexpr int head_dim               = 0;
+    static constexpr int feature_layers         = 0;
+    static constexpr int feature_rows           = 0;
+    static constexpr int hidden                 = 0;
+    static constexpr int intermediate           = 0;
+    static constexpr int query_heads            = 0;
+    static constexpr int query_size             = 0;
+    static constexpr int kv_size                = 0;
 };
 
 inline constexpr float kAttentionScale                   = 0.0625F;

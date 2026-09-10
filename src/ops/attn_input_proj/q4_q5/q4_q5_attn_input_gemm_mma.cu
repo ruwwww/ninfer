@@ -72,7 +72,7 @@ void launch_slice(const Tensor& x, const Weight& query_key_weight, const Weight&
 template <class Schedule>
 void launch(const Tensor& x, const Weight& query_key_weight, const Weight& gate_value_weight,
             Tensor& q, Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream) {
-    constexpr std::int32_t kSliceCols = 128;
+    constexpr std::int32_t kSliceCols = Schedule::BN;
     for_each_token_slice(x.ne[1], kSliceCols, [&](std::int32_t offset, std::int32_t count) {
         const Tensor x_slice = x.slice(1, offset, count);
         Tensor q_slice       = q.slice(1, offset, count);
@@ -84,17 +84,47 @@ void launch(const Tensor& x, const Weight& query_key_weight, const Weight& gate_
     });
 }
 
-using MmaR16C64S3 = GemmCfg<16, 64, 64, 16, 16, 3, 1, false, true, true>;
-using MmaR32C64S4 = GemmCfg<32, 64, 64, 16, 16, 4, 1, false, true, true>;
+template <std::int32_t InputRows, std::int32_t ParentRows, std::int32_t QueryRows,
+          std::int32_t KvRows>
+struct AttnInputMmaGeometry {
+    static constexpr std::int32_t kInputRows  = InputRows;
+    static constexpr std::int32_t kParentRows = ParentRows;
+    static constexpr std::int32_t kQueryRows  = QueryRows;
+    static constexpr std::int32_t kKvRows     = KvRows;
+};
 
-} // namespace
+using AttnInputMmaGeometry27 = AttnInputMmaGeometry<5120, 7168, 6144, 1024>;
+using AttnInputMmaGeometry9  = AttnInputMmaGeometry<4096, 5120, 4096, 1024>;
+using MmaR32C64S4            = GemmCfg<32, 64, 64, 16, 16, 4, 1, false, true, true>;
 
-void q4_q5_attn_input_grouped_mma_r16_c64_s3_launch(const Tensor& x, const Weight& query_key_weight,
-                                                    const Weight& gate_value_weight, Tensor& q,
-                                                    Tensor& gate, Tensor& k, Tensor& v,
-                                                    cudaStream_t stream) {
-    launch<MmaR16C64S3>(x, query_key_weight, gate_value_weight, q, gate, k, v, stream);
+template <class Geometry, class S, bool Full>
+void mixed_slice(const Tensor& x, const Weight& w0, const Weight& w1, Tensor& q, Tensor& g,
+                 Tensor& k, Tensor& v, cudaStream_t stream) {
+    const dim3 grid(2 * Geometry::kParentRows / S::BM, (x.ne[1] + S::BN - 1) / S::BN);
+    rowsplit_grouped_mma_kernel<S, Full, RowSplitGroupedMmaCodec::Mixed, 4>
+        <<<grid, S::THREADS, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
+                                          make_job(w0, 0, Geometry::kQueryRows, q),
+                                          make_job(w0, Geometry::kQueryRows, Geometry::kKvRows, k),
+                                          make_job(w1, 0, Geometry::kQueryRows, g),
+                                          make_job(w1, Geometry::kQueryRows, Geometry::kKvRows, v),
+                                          Geometry::kInputRows, x.ne[1], Geometry::kInputRows);
+    CUDA_CHECK(cudaGetLastError());
 }
+
+template <class Geometry, class S>
+void launch_mixed(const Tensor& x, const Weight& w0, const Weight& w1, Tensor& q, Tensor& g,
+                  Tensor& k, Tensor& v, cudaStream_t stream) {
+    for_each_token_slice(x.ne[1], S::BN, [&](int begin, int count) {
+        const Tensor xs = x.slice(1, begin, count);
+        Tensor qs = q.slice(1, begin, count), gs = g.slice(1, begin, count),
+               ks = k.slice(1, begin, count), vs = v.slice(1, begin, count);
+        if (count % S::BN == 0)
+            mixed_slice<Geometry, S, true>(xs, w0, w1, qs, gs, ks, vs, stream);
+        else
+            mixed_slice<Geometry, S, false>(xs, w0, w1, qs, gs, ks, vs, stream);
+    });
+}
+} // namespace
 
 void q4_q5_attn_input_grouped_mma_r32_c64_s4_launch(const Tensor& x, const Weight& query_key_weight,
                                                     const Weight& gate_value_weight, Tensor& q,
@@ -103,4 +133,29 @@ void q4_q5_attn_input_grouped_mma_r32_c64_s4_launch(const Tensor& x, const Weigh
     launch<MmaR32C64S4>(x, query_key_weight, gate_value_weight, q, gate, k, v, stream);
 }
 
+void q4_q5_attn_input_mixed_r32_c64_s3_launch(const Tensor& x, const Weight& w0, const Weight& w1,
+                                              Tensor& q, Tensor& g, Tensor& k, Tensor& v,
+                                              cudaStream_t stream) {
+    using Schedule = GemmCfg<32, 64, 64, 16, 16, 3, 3, false, true, true>;
+    if (x.ne[0] == AttnInputMmaGeometry9::kInputRows)
+        launch_mixed<AttnInputMmaGeometry9, Schedule>(x, w0, w1, q, g, k, v, stream);
+    else
+        launch_mixed<AttnInputMmaGeometry27, Schedule>(x, w0, w1, q, g, k, v, stream);
+}
+
+void q4_q5_attn_input_pair_r32_c64_s3_launch(const Tensor& x, const Weight& w0, const Weight& w1,
+                                             Tensor& q, Tensor& g, Tensor& k, Tensor& v,
+                                             cudaStream_t stream) {
+    launch<GemmCfg<32, 64, 64, 32, 16, 3, 2, false, true, true>>(x, w0, w1, q, g, k, v, stream);
+}
+
+void q4_q5_attn_input_mixed_r64_c128_s2_launch(const Tensor& x, const Weight& w0, const Weight& w1,
+                                               Tensor& q, Tensor& g, Tensor& k, Tensor& v,
+                                               cudaStream_t stream) {
+    using Schedule = GemmCfg<64, 128, 64, 64, 16, 2, 2, false, true, true>;
+    if (x.ne[0] == AttnInputMmaGeometry9::kInputRows)
+        launch_mixed<AttnInputMmaGeometry9, Schedule>(x, w0, w1, q, g, k, v, stream);
+    else
+        launch_mixed<AttnInputMmaGeometry27, Schedule>(x, w0, w1, q, g, k, v, stream);
+}
 } // namespace ninfer::ops::detail
