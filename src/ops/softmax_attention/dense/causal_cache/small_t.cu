@@ -164,16 +164,32 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
     if constexpr (TokenTile >= 6) {
-        // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
-        // loop iterations; dynamic smem avoids penalizing the long-context path.
-        if (implementation_window > 128 && implementation_window <= 160) {
-            launch.template operator()<24, 1, 32, false>();
-        } else if (implementation_window <= 2054) {
-            launch.template operator()<12, 1, 32, false>();
-        } else if (implementation_window <= 8198) {
-            launch.template operator()<12, 1, 64, true>();
+        if constexpr (Geometry::GroupSize == 4) {
+            // Two Q row tiles for the 9B group of four. Match the existing
+            // GroupSize=8 consumer-warps profiles while accounting for the
+            // smaller row tile count, so PVNtPerWarp remains a supported
+            // tensor-core fragment width.
+            if (implementation_window > 128 && implementation_window <= 160) {
+                launch.template operator()<16, 1, 32, false>();
+            } else if (implementation_window <= 2054) {
+                launch.template operator()<8, 1, 32, false>();
+            } else if (implementation_window <= 8198) {
+                launch.template operator()<8, 1, 64, true>();
+            } else {
+                launch.template operator()<4, 2, 32, false>();
+            }
         } else {
-            launch.template operator()<6, 2, 32, false>();
+            // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
+            // loop iterations; dynamic smem avoids penalizing the long-context path.
+            if (implementation_window > 128 && implementation_window <= 160) {
+                launch.template operator()<24, 1, 32, false>();
+            } else if (implementation_window <= 2054) {
+                launch.template operator()<12, 1, 32, false>();
+            } else if (implementation_window <= 8198) {
+                launch.template operator()<12, 1, 64, true>();
+            } else {
+                launch.template operator()<6, 2, 32, false>();
+            }
         }
     } else if constexpr (TokenTile == 5) {
         if constexpr (Geometry::GroupSize == 6) {
@@ -184,6 +200,17 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 launch.template operator()<16, 1, 32, false>();
             } else {
                 launch.template operator()<8, 2, 32, false>();
+            }
+        } else if constexpr (Geometry::GroupSize == 4) {
+            // Two Q row tiles for the 9B group of four. The warp counts are
+            // scaled from the GroupSize=8 profiles to keep the same number of
+            // consumer warps per row tile.
+            if (implementation_window > 128 && implementation_window <= 512) {
+                launch.template operator()<16, 1, 32, false>();
+            } else if (implementation_window <= 1029) {
+                launch.template operator()<8, 1, 32, false>();
+            } else {
+                launch.template operator()<4, 2, 32, false>();
             }
         } else {
             // Three Q row tiles for the 35B group of eight. The 24/12-warp
@@ -213,7 +240,8 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
 
 } // namespace
 
-std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
+std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t kv_heads,
+                                             std::int32_t tokens,
                                              KvCacheStorage cache_storage,
                                              CausalAttentionExecutionEnvelope envelope,
                                              std::int32_t batch_size) {
@@ -222,7 +250,7 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
         throw std::invalid_argument("causal_softmax_attention split capacity: invalid profile");
     }
     (void)paged_kv_storage_layout(cache_storage, kCausalHeadDim);
-    if (q_heads == CausalD256H24Kv4::QHeads) {
+    if (q_heads == CausalD256H24Kv4::QHeads && kv_heads == CausalD256H24Kv4::KVHeads) {
         const int capacity =
             causal_small_t_launch_capacity<CausalD256H24Kv4>(envelope, tokens, cache_storage);
         if (batch_size > 1) {
@@ -245,7 +273,10 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
         }
         return capacity;
     }
-    if (q_heads == CausalD256H16Kv2::QHeads) {
+    if (q_heads == CausalD256H16Kv4::QHeads && kv_heads == CausalD256H16Kv4::KVHeads) {
+        return causal_small_t_launch_capacity<CausalD256H16Kv4>(envelope, tokens, cache_storage);
+    }
+    if (q_heads == CausalD256H16Kv2::QHeads && kv_heads == CausalD256H16Kv2::KVHeads) {
         return causal_small_t_launch_capacity<CausalD256H16Kv2>(envelope, tokens, cache_storage);
     }
     throw std::invalid_argument(
@@ -262,7 +293,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     const auto logical_capacity      = static_cast<std::int32_t>(envelope.max_visible_keys);
     const auto implementation_window = static_cast<std::int32_t>(envelope.max_visible_keys);
     const auto splits                = causal_attention_split_capacity(
-        Geometry::QHeads, invocation.width, cache.storage, envelope, invocation.batch_size);
+        Geometry::QHeads, Geometry::KVHeads, invocation.width, cache.storage, envelope,
+        invocation.batch_size);
 
     // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
     // geometry inside launch_tc_partial_i8.
@@ -407,6 +439,12 @@ void causal_attention_small_t_launch(
                                                               partial_m, partial_l, out, stream);
         return;
     }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(q, input, pos, scale, cache,
+                                                              invocation, envelope, partial_acc,
+                                                              partial_m, partial_l, out, stream);
+        return;
+    }
     causal_attention_small_t_launch_for<CausalD256H16Kv2>(q, input, pos, scale, cache, invocation,
                                                           envelope, partial_acc, partial_m,
                                                           partial_l, out, stream);
@@ -444,6 +482,12 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
     const PagedKVBatchLayerView batch_cache = single_row_paged_kv_batch_view(cache);
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_launch_for<CausalD256H24Kv4>(q, input, pos, scale, batch_cache,
+                                                              invocation, envelope, partial_acc,
+                                                              partial_m, partial_l, out, stream);
+        return;
+    }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(q, input, pos, scale, batch_cache,
                                                               invocation, envelope, partial_acc,
                                                               partial_m, partial_l, out, stream);
         return;

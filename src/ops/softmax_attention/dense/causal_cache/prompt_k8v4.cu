@@ -46,6 +46,11 @@ void causal_attention_prompt_k8v4_attention_dispatch(const Tensor& q, const Tens
             q, positions, scale, cache, metadata, out, stream);
         return;
     }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_prompt_k8v4_attention_launch_for<CausalD256H16Kv4>(
+            q, positions, scale, cache, metadata, out, stream);
+        return;
+    }
     causal_attention_prompt_k8v4_attention_launch_for<CausalD256H16Kv2>(q, positions, scale, cache,
                                                                         metadata, out, stream);
 }

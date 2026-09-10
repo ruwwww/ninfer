@@ -40,6 +40,10 @@ void dispatch(const Tensor& q, const Tensor& positions, float scale, const Cache
         launch_for<CausalD256H24Kv4>(q, positions, scale, cache, metadata, out, stream);
         return;
     }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        launch_for<CausalD256H16Kv4>(q, positions, scale, cache, metadata, out, stream);
+        return;
+    }
     launch_for<CausalD256H16Kv2>(q, positions, scale, cache, metadata, out, stream);
 }
 
