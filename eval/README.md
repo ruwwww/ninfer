@@ -2,8 +2,8 @@
 
 `eval/` contains the repository-local capability evaluation coordinator. It can evaluate this
 project's server, another local OpenAI-compatible service, or a remote online model. The inference
-engine is only one possible target; its single-sequence limitation is represented by
-`max_concurrency: 1`, not built into the framework.
+engine is only one possible target; each target and job declares the concurrency admitted by that
+particular server run instead of baking an Engine policy into the framework.
 
 EvalScope is the first real evaluation backend. The coordinator, configuration, logging, progress,
 resume, and result contracts do not import or depend on EvalScope. The deterministic `mock` backend
@@ -18,15 +18,23 @@ python3 -m venv eval/.venv
 eval/.venv/bin/python -m pip install -r eval/requirements.txt
 ```
 
-The pinned initial stack is EvalScope 1.9.0, `bfcl-eval==2025.10.27.1`, and the BFCL runtime
-dependency `soundfile==0.14.0`. Dataset and model caches remain owned by their upstream libraries.
-Installing dependencies does not download the Qwen model or create a `.ninfer` artifact.
+The pinned stack is EvalScope 1.10.0 with its BFCL, IFBench, and Needle-in-a-Haystack extras,
+`bfcl-eval==2025.10.27.1`, and the BFCL runtime dependency `soundfile==0.14.0`. Dataset and model
+caches remain owned by their upstream libraries. Installing dependencies does not download the
+Qwen model or create a `.ninfer` artifact.
 
 ## Configuration
 
 See [`configs/capability-suite.yaml`](configs/capability-suite.yaml) for the initial AIME25,
 AIME26, GPQA-Diamond, and BFCL-v4 suites, and [`configs/mock-suite.yaml`](configs/mock-suite.yaml)
 for a network-free example.
+
+The published Qwen3.6 reasoning runs retain their exact configurations in
+[`configs/qwen3_6_27b_reasoning.yaml`](configs/qwen3_6_27b_reasoning.yaml),
+[`configs/qwen3_6_35b_aime.yaml`](configs/qwen3_6_35b_aime.yaml), and
+[`configs/qwen3_6_35b_gpqa.yaml`](configs/qwen3_6_35b_gpqa.yaml). The Qwen3.8 groupwise-int and
+NVFP4 campaigns use their format-specific reasoning configurations and managed scripts documented
+below.
 
 [`configs/qwen3_6_35b_needle_haystack.yaml`](configs/qwen3_6_35b_needle_haystack.yaml)
 defines the 35B-A3B Needle-in-a-Haystack profiles separately: `standard` preserves EvalScope's
@@ -61,8 +69,9 @@ Concurrency has two levels:
 - optional job `max_concurrency` caps how many target slots one job may reserve.
 
 For EvalScope, the granted job slots become `eval_batch_size`. Multiple jobs sharing a target can
-never reserve more slots than the target capacity. Set the local `ninfer-serve` target to one; set a
-larger explicit value for an online service that supports it.
+never reserve more slots than the target capacity. For `ninfer-serve`, match the target capacity to
+the server's startup `--max-concurrency`; an individual long-output job may set a lower concurrency
+when its KV entitlement requires it.
 
 Portable generation settings live under `generation`. Evaluator-specific controls live under
 `backend_args`; unknown fields are rejected rather than silently ignored.
@@ -115,6 +124,72 @@ eval/.venv/bin/python -m ninfer_eval run \
 SERPAPI_API_KEY=... eval/.venv/bin/python -m ninfer_eval run \
   --config eval/configs/capability-suite.yaml --suite bfcl_full
 ```
+
+For the Qwen3.8-27B NVFP4 evaluation, first populate EvalScope's default ModelScope dataset cache:
+
+```bash
+eval/.venv/bin/python - <<'PY'
+from modelscope import dataset_snapshot_download
+
+for dataset_id in (
+    'evalscope/ERQA',
+    'allenai/IFBench_test',
+    'lmms-lab/RealWorldQA',
+):
+    print(dataset_snapshot_download(dataset_id))
+PY
+```
+
+The formal run is deliberately split into two independently resumable steps. Inspect the plans,
+then run the text step (IFBench, AIME25, AIME26, and GPQA-Diamond) and the multimodal step (ERQA and
+RealWorldQA):
+
+```bash
+eval/run_qwen3_8_27b_nvfp4_reasoning.sh --plan
+eval/run_qwen3_8_27b_nvfp4_reasoning.sh
+```
+
+With no step argument the script runs the two steps back to back, restarting the server between
+them. Pass `text` or `multimodal` to run a single step only, and `--plan` to preview the plan for
+the selected step(s) without starting the server.
+
+The script starts a fresh local server for each step. The text server uses a 252,928-token context
+(the largest that fits the RTX 5090 after weights; 262,144 is rejected at startup) and omits
+`--vision`, so Vision's fixed GPU allocations do not reduce the KV pool needed by long reasoning.
+The multimodal server is restarted with `--vision` and an 81,920-token context. Across the cached
+ERQA and RealWorldQA data, the largest fully rendered prompt is ERQA_75 at 12,394 tokens; combined
+with the 65,536-token output bound, it leaves 3,990 tokens of context slack. Sampling is specified
+only by each EvalScope request. The target and ordinary jobs use concurrency two; GPQA-Diamond runs
+at concurrency one so its 245,760-token output budget can accommodate the observed long tail. AIME
+uses 122,880 output tokens per request, while IFBench and both multimodal datasets use 65,536.
+
+The completed formal run recorded these scores (run directories `eval/runs/20260818T132336Z-c16a8902`
+and `eval/runs/20260818T223812Z-da6cdbce`):
+
+| Benchmark | Accuracy | Correct / total |
+|---|---:|---:|
+| IFBench (prompt-level strict) | 77.00% | 231 / 300 |
+| AIME 2025 | 96.67% | 29 / 30 |
+| AIME 2026 | 96.67% | 29 / 30 |
+| GPQA-Diamond | 90.40% | 179 / 198 |
+| ERQA | 66.25% | 265 / 400 |
+| RealWorldQA | 83.53% | 639 / 765 |
+
+The Qwen3.8-27B groupwise-int profile runs the same protocol through
+`eval/run_qwen3_8_27b_groupwise_reasoning.sh`. Its 16.96 GiB artifact leaves more GPU memory, so the
+text step uses the full 262,144-token context and both steps run at concurrency four (run
+directories `eval/runs/20260819T031655Z-078bd8e0` and `eval/runs/20260819T141750Z-531a236a`; the
+multimodal step was resumed with `ninfer_eval resume` after a local proxy change interrupted
+RealWorldQA at 618/765 samples):
+
+| Benchmark | Accuracy | Correct / total |
+|---|---:|---:|
+| IFBench (prompt-level strict) | 77.67% | 233 / 300 |
+| AIME 2025 | 96.67% | 29 / 30 |
+| AIME 2026 | 96.67% | 29 / 30 |
+| GPQA-Diamond | 87.37% | 173 / 198 |
+| ERQA | 66.25% | 265 / 400 |
+| RealWorldQA | 82.22% | 629 / 765 |
 
 Prepare and inspect Needle-in-a-Haystack without issuing model requests:
 
@@ -173,6 +248,32 @@ Every run is stored below `eval/runs/<timestamp>-<config-hash>/`:
 The sample-retention policy is recorded in the manifest. API keys and known secret values are
 redacted from coordinator events and task snapshots.
 
+## Historical Qwen3.6-27B reasoning profile
+
+The published Qwen3.6-27B scores and per-dataset correct/total counts are recorded in the
+[groupwise-int model card](../model-cards/Qwen3.6-27B-NInfer/README.md#evaluation) and
+[NVFP4 model card](../model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md#evaluation).
+Those runs used EvalScope 1.9.0, one sample per problem, and the sampling settings recorded on
+the cards. The current pinned evaluation environment is newer; rerunning the commands below
+reproduces the workload on the selected environment, not the historical score automatically.
+
+The NVFP4 serving command was:
+
+```bash
+build/apps/ninfer-serve out/qwen3_6_27b_nvfp4.ninfer \
+  --host 127.0.0.1 --port 18080 \
+  --max-context 262144 --prefill-chunk 1024 --kv-dtype int8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft
+```
+
+Run the configured reasoning suite in a separate shell using the evaluation environment above:
+
+```bash
+PYTHONPATH=eval eval/.venv/bin/python -m ninfer_eval run \
+  --config eval/configs/qwen3_6_27b_reasoning.yaml \
+  --suite reasoning_full
+```
+
 ## Scores
 
 Each benchmark remains independently reportable. The framework does not average AIME, GPQA, and
@@ -180,6 +281,10 @@ BFCL into an invented cross-benchmark score.
 
 - AIME25 and AIME26 report rule-scored accuracy over 30 samples each.
 - GPQA-Diamond reports accuracy over 198 samples.
+- IFBench reports prompt- and instruction-level strict and loose adherence over 300 samples; its
+  primary metric is `prompt_level_strict`.
+- ERQA reports accuracy over 400 multimodal samples across eight reasoning subsets.
+- RealWorldQA reports accuracy over 765 multimodal samples.
 - BFCL-v4 reports its official `agentic`, `multi_turn`, `live`, `non_live`, `hallucination`, and
   `overall` values when the full score-bearing suite is complete.
 

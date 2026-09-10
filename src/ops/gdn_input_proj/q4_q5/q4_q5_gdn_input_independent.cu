@@ -93,7 +93,7 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t 
         launch_q4_simt_route<Geometry, Q4GdnSimtR8C8Schedule>(x, weight, out, stream);
         return;
     }
-    throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,16]");
+    throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,15]");
 }
 
 template <class Geometry>
@@ -200,7 +200,7 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
         launch_q5_simt_r8_c8<Geometry>(x, weight, value, z, stream);
         return;
     }
-    throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,16]");
+    throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,15]");
 }
 
 template <class Geometry>
